@@ -1,0 +1,25 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      PYTHONPATH: ${{ github.workspace }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install system OCR
+        run: sudo apt-get update && sudo apt-get install -y tesseract-ocr tesseract-ocr-rus libgl1
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+      - name: Compile
+        run: python -m compileall app run.py
+      - name: Test
+        run: pytest -q
