@@ -68,7 +68,7 @@ async def _match_known(db, address: str):
     for c in candidates:
         if sig and house_signature(c[2]) != sig:
             continue
-        score = fuzz.ratio(key, c[1])
+        score = fuzz.ratio(key, canonical_key(c[2]))
         if score > best_score:
             best, best_score = c, score
     return best if best_score >= 94 else None
@@ -89,8 +89,14 @@ async def create_route(chat_id: int, route_date: str, image_path: str | None, ro
             lab = p.get("lab_type", "UNKNOWN")
             if known:
                 known_id = known[0]
-                nav = known[2]
-                await db.execute("UPDATE known_addresses SET last_seen=? WHERE id=?", (now, known_id))
+                # New OCR/catalog data may be cleaner than values stored on the first run.
+                stored_lab = known[3]
+                if lab == "UNKNOWN" and stored_lab != "UNKNOWN":
+                    lab = stored_lab
+                await db.execute(
+                    "UPDATE known_addresses SET nav_address=?, lab_type=?, last_seen=? WHERE id=?",
+                    (nav, lab, now, known_id),
+                )
             else:
                 key = canonical_key(nav)
                 c2 = await db.execute(
