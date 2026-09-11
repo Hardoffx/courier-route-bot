@@ -46,36 +46,62 @@ class AddState(StatesGroup):
 
 
 def badge(kind: str) -> str:
-    return {"INVITRO": "🟢 INV", "CMD": "🟡 CMD", "OTHER": "🟠 ДР", "UNKNOWN": "⚪ ?"}.get(kind, "⚪ ?")
+    return {"INVITRO": "🟢 INVITRO", "CMD": "🟡 CMD", "OTHER": "🟠 ДРУГИЕ", "UNKNOWN": "⚪ ?"}.get(kind, "⚪ ?")
+
+
+def icon(kind: str) -> str:
+    return {"INVITRO": "🟢", "CMD": "🟡", "OTHER": "🟠", "UNKNOWN": "⚪"}.get(kind, "⚪")
 
 
 def yandex_url(address: str) -> str:
     return "https://yandex.ru/maps/?text=" + quote_plus(address)
 
 
+def summary_text(points: list[dict], diff_text: str | None = None) -> str:
+    counts = {k: sum(1 for p in points if p["lab_type"] == k) for k in ("INVITRO", "CMD", "OTHER", "UNKNOWN")}
+    done_count = sum(int(p["done"]) for p in points)
+    progress = f"\n✅ Выполнено: <b>{done_count}/{len(points)}</b>" if done_count else ""
+    diff = f"\n\n{diff_text}" if diff_text else ""
+    return (
+        "🚚 <b>Маршрут готов</b>\n\n"
+        f"Точек: <b>{len(points)}</b>{progress}\n"
+        f"🟢 INVITRO: {counts['INVITRO']}\n"
+        f"🟡 CMD: {counts['CMD']}\n"
+        f"🟠 Другие: {counts['OTHER']}\n"
+        f"⚪ Не определено: {counts['UNKNOWN']}"
+        f"{diff}"
+    )
+
+
 def summary_kb(route_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="▶️ Начать маршрут", callback_data=f"point:{route_id}:0")],
-        [InlineKeyboardButton(text="📋 Все точки", callback_data=f"list:{route_id}:0")],
-        [InlineKeyboardButton(text="➕ Добавить точку", callback_data=f"add:{route_id}")],
+        [InlineKeyboardButton(text="▶️ Начать / продолжить", callback_data=f"resume:{route_id}")],
+        [
+            InlineKeyboardButton(text="📋 Все точки", callback_data=f"list:{route_id}:0"),
+            InlineKeyboardButton(text="➕ Добавить", callback_data=f"add:{route_id}"),
+        ],
     ])
 
 
 def point_kb(point: dict, route_id: int, index: int, total: int) -> InlineKeyboardMarkup:
     rows = [
-        [InlineKeyboardButton(text="🗺 Яндекс.Карты", url=yandex_url(point["nav_address"]))],
+        [InlineKeyboardButton(text="🗺 Открыть в Яндекс.Картах", url=yandex_url(point["nav_address"]))],
         [
-            InlineKeyboardButton(text="📝 Заметка", callback_data=f"note:{point['id']}:{route_id}:{index}"),
             InlineKeyboardButton(text="✅ Выполнено", callback_data=f"done:{point['id']}:{route_id}:{index}"),
+            InlineKeyboardButton(text="📝 Заметка", callback_data=f"note:{point['id']}:{route_id}:{index}"),
         ],
     ]
     nav = []
     if index > 0:
-        nav.append(InlineKeyboardButton(text="←", callback_data=f"point:{route_id}:{index-1}"))
+        nav.append(InlineKeyboardButton(text="⬅️ Предыдущая", callback_data=f"point:{route_id}:{index-1}"))
     if index < total - 1:
-        nav.append(InlineKeyboardButton(text="→", callback_data=f"point:{route_id}:{index+1}"))
+        nav.append(InlineKeyboardButton(text="Следующая ➡️", callback_data=f"point:{route_id}:{index+1}"))
     if nav:
         rows.append(nav)
+    rows.append([
+        InlineKeyboardButton(text="📋 Весь список", callback_data=f"list:{route_id}:{index // 6}"),
+        InlineKeyboardButton(text="🏠 Маршрут", callback_data=f"summary:{route_id}"),
+    ])
     rows.append([InlineKeyboardButton(text="➕ Добавить точку", callback_data=f"add:{route_id}")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -83,14 +109,45 @@ def point_kb(point: dict, route_id: int, index: int, total: int) -> InlineKeyboa
 def point_text(point: dict, index: int, total: int) -> str:
     source = " · ➕ доп." if point["source"] == "MANUAL" else ""
     note = f"\n\n⚠️ <b>Не забыть:</b> {point['note']}" if point["note"] else ""
-    done = "✅ " if point["done"] else ""
-    return f"{done}<b>ТОЧКА {index+1}/{total}</b> · {badge(point['lab_type'])}{source}\n\n<code>{point['nav_address']}</code>{note}"
+    state = "✅ ВЫПОЛНЕНО\n" if point["done"] else ""
+    return (
+        f"{state}<b>ТОЧКА {index+1} / {total}</b> · {badge(point['lab_type'])}{source}\n\n"
+        f"<b>{point['nav_address']}</b>{note}"
+    )
+
+
+def list_keyboard(route_id: int, page: int, start: int, chunk: list[dict], total: int) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    numbered: list[InlineKeyboardButton] = []
+    for offset, _ in enumerate(chunk):
+        idx = start + offset
+        numbered.append(InlineKeyboardButton(text=str(idx + 1), callback_data=f"point:{route_id}:{idx}"))
+        if len(numbered) == 3:
+            rows.append(numbered)
+            numbered = []
+    if numbered:
+        rows.append(numbered)
+
+    nav: list[InlineKeyboardButton] = []
+    if page > 0:
+        nav.append(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"list:{route_id}:{page-1}"))
+    if start + len(chunk) < total:
+        nav.append(InlineKeyboardButton(text="Вперёд ➡️", callback_data=f"list:{route_id}:{page+1}"))
+    if nav:
+        rows.append(nav)
+    rows.append([
+        InlineKeyboardButton(text="▶️ Продолжить", callback_data=f"resume:{route_id}"),
+        InlineKeyboardButton(text="🏠 Маршрут", callback_data=f"summary:{route_id}"),
+    ])
+    rows.append([InlineKeyboardButton(text="➕ Добавить точку", callback_data=f"add:{route_id}")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 @dp.message(CommandStart())
 async def start(message: Message):
     await message.answer(
-        "🚚 <b>Маршрутный бот</b>\n\nОтправь фотографию сегодняшнего маршрутного листа. Адреса будут взяты строго сверху вниз.",
+        "🚚 <b>RoutePilot</b>\n\nОтправь фотографию сегодняшнего маршрутного листа. "
+        "Я возьму точки строго сверху вниз и подготовлю маршрут.",
         parse_mode="HTML",
     )
 
@@ -102,7 +159,7 @@ async def route_cmd(message: Message):
         await message.answer("Маршрутов пока нет. Отправь утреннюю фотографию.")
         return
     points = await get_points(route["id"])
-    await message.answer(f"🚚 Последний маршрут: <b>{len(points)} точек</b>", parse_mode="HTML", reply_markup=summary_kb(route["id"]))
+    await message.answer(summary_text(points), parse_mode="HTML", reply_markup=summary_kb(route["id"]))
 
 
 @dp.message(Command("add"))
@@ -113,7 +170,7 @@ async def add_cmd(message: Message, state: FSMContext):
         return
     await state.set_state(AddState.waiting)
     await state.update_data(route_id=route["id"])
-    await message.answer("➕ Пришли дополнительный адрес текстом. Можно вставить его прямо из Messenger.")
+    await message.answer("➕ Пришли дополнительный адрес текстом.")
 
 
 @dp.message(F.photo)
@@ -151,15 +208,32 @@ async def photo(message: Message, bot: Bot):
                 chunks.append("↕️ Изменён порядок точек")
             diff_text = "\n".join(chunks)
 
-    counts = {k: sum(1 for p in points if p["lab_type"] == k) for k in ("INVITRO", "CMD", "OTHER", "UNKNOWN")}
     await status.edit_text(
-        "🚚 <b>Маршрут готов</b>\n\n"
-        f"Точек: <b>{len(points)}</b>\n"
-        f"🟢 INVITRO: {counts['INVITRO']}\n🟡 CMD: {counts['CMD']}\n🟠 Другие: {counts['OTHER']}\n⚪ Не определено: {counts['UNKNOWN']}\n\n"
-        f"{diff_text}\n\nПеред стартом открой список и быстро проверь адреса.",
+        summary_text(points, diff_text) + "\n\nПеред стартом можно быстро проверить список.",
         parse_mode="HTML",
         reply_markup=summary_kb(route_id),
     )
+
+
+@dp.callback_query(F.data.startswith("summary:"))
+async def show_summary(cb: CallbackQuery):
+    route_id = int(cb.data.split(":")[1])
+    points = await get_points(route_id)
+    await cb.message.edit_text(summary_text(points), parse_mode="HTML", reply_markup=summary_kb(route_id))
+    await cb.answer()
+
+
+@dp.callback_query(F.data.startswith("resume:"))
+async def resume_route(cb: CallbackQuery):
+    route_id = int(cb.data.split(":")[1])
+    points = await get_points(route_id)
+    if not points:
+        await cb.answer("Маршрут пуст", show_alert=True)
+        return
+    idx = next((i for i, p in enumerate(points) if not p["done"]), len(points) - 1)
+    point = points[idx]
+    await cb.message.edit_text(point_text(point, idx, len(points)), parse_mode="HTML", reply_markup=point_kb(point, route_id, idx, len(points)))
+    await cb.answer()
 
 
 @dp.callback_query(F.data.startswith("point:"))
@@ -183,12 +257,15 @@ async def done(cb: CallbackQuery):
     await mark_done(point_id)
     points = await get_points(route_id)
     if idx >= len(points) - 1:
-        done_count = sum(int(p["done"]) for p in points)
-        await cb.message.edit_text(f"🏁 <b>Маршрут завершён</b>\n\nВыполнено: {done_count}/{len(points)}", parse_mode="HTML", reply_markup=summary_kb(route_id))
+        await cb.message.edit_text(
+            "🏁 <b>Маршрут завершён</b>\n\n" + summary_text(points),
+            parse_mode="HTML",
+            reply_markup=summary_kb(route_id),
+        )
     else:
         nxt = points[idx + 1]
         await cb.message.edit_text(point_text(nxt, idx + 1, len(points)), parse_mode="HTML", reply_markup=point_kb(nxt, route_id, idx + 1, len(points)))
-    await cb.answer("Готово")
+    await cb.answer("Точка выполнена")
 
 
 @dp.callback_query(F.data.startswith("list:"))
@@ -196,25 +273,23 @@ async def list_points(cb: CallbackQuery):
     _, route_s, page_s = cb.data.split(":")
     route_id, page = int(route_s), int(page_s)
     points = await get_points(route_id)
-    per_page = 7
+    per_page = 6
+    max_page = max(0, (len(points) - 1) // per_page)
+    page = max(0, min(page, max_page))
     start = page * per_page
     chunk = points[start:start + per_page]
-    lines = [f"📋 <b>Маршрут · {len(points)} точек</b>\n"]
-    kb = []
+    end = start + len(chunk)
+    lines = [f"📋 <b>Маршрут · {len(points)} точек</b>   <i>{start+1}–{end}</i>\n"]
     for i, p in enumerate(chunk, start=start):
-        mark = "✅" if p["done"] else badge(p["lab_type"]).split()[0]
-        note = " ⚠️" if p["note"] else ""
-        lines.append(f"{i+1}. {mark}{note} <code>{p['nav_address']}</code>")
-        kb.append([InlineKeyboardButton(text=f"{i+1}. Открыть", callback_data=f"point:{route_id}:{i}")])
-    nav = []
-    if page > 0:
-        nav.append(InlineKeyboardButton(text="←", callback_data=f"list:{route_id}:{page-1}"))
-    if start + per_page < len(points):
-        nav.append(InlineKeyboardButton(text="→", callback_data=f"list:{route_id}:{page+1}"))
-    if nav:
-        kb.append(nav)
-    kb.append([InlineKeyboardButton(text="➕ Добавить точку", callback_data=f"add:{route_id}")])
-    await cb.message.edit_text("\n".join(lines), parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
+        mark = "✅" if p["done"] else icon(p["lab_type"])
+        note = " 📝" if p["note"] else ""
+        lines.append(f"<b>{i+1}.</b> {mark}{note} {p['nav_address']}")
+    lines.append("\nНажми номер точки, чтобы открыть её.")
+    await cb.message.edit_text(
+        "\n".join(lines),
+        parse_mode="HTML",
+        reply_markup=list_keyboard(route_id, page, start, chunk, len(points)),
+    )
     await cb.answer()
 
 
@@ -223,7 +298,7 @@ async def note_begin(cb: CallbackQuery, state: FSMContext):
     _, point_s, route_s, idx_s = cb.data.split(":")
     await state.set_state(NoteState.waiting)
     await state.update_data(point_id=int(point_s), route_id=int(route_s), idx=int(idx_s))
-    await cb.message.answer("📝 Напиши, что нужно не забыть на этой точке: расходники, документы, забрать/передать что-либо и т.д.")
+    await cb.message.answer("📝 Напиши заметку для этой точки: расходники, документы, что забрать или передать.")
     await cb.answer()
 
 
@@ -234,7 +309,11 @@ async def note_save(message: Message, state: FSMContext):
     point = await get_point(data["point_id"])
     points = await get_points(data["route_id"])
     await state.clear()
-    await message.answer("✅ Заметка сохранена только для этой точки сегодняшнего маршрута.\n\n" + point_text(point, data["idx"], len(points)), parse_mode="HTML", reply_markup=point_kb(point, data["route_id"], data["idx"], len(points)))
+    await message.answer(
+        "✅ Заметка сохранена.\n\n" + point_text(point, data["idx"], len(points)),
+        parse_mode="HTML",
+        reply_markup=point_kb(point, data["route_id"], data["idx"], len(points)),
+    )
 
 
 @dp.callback_query(F.data.startswith("add:"))
@@ -242,7 +321,7 @@ async def add_begin(cb: CallbackQuery, state: FSMContext):
     route_id = int(cb.data.split(":")[1])
     await state.set_state(AddState.waiting)
     await state.update_data(route_id=route_id)
-    await cb.message.answer("➕ Пришли дополнительный адрес текстом. Он будет добавлен в конец текущего маршрута.")
+    await cb.message.answer("➕ Пришли дополнительный адрес текстом. Он будет добавлен в конец маршрута.")
     await cb.answer()
 
 
@@ -255,7 +334,11 @@ async def add_save(message: Message, state: FSMContext):
     points = await get_points(data["route_id"])
     idx = next(i for i, p in enumerate(points) if p["id"] == point_id)
     point = points[idx]
-    await message.answer("✅ Дополнительная точка добавлена.\n\n" + point_text(point, idx, len(points)), parse_mode="HTML", reply_markup=point_kb(point, data["route_id"], idx, len(points)))
+    await message.answer(
+        "✅ Дополнительная точка добавлена.\n\n" + point_text(point, idx, len(points)),
+        parse_mode="HTML",
+        reply_markup=point_kb(point, data["route_id"], idx, len(points)),
+    )
 
 
 async def main():
