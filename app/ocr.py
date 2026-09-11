@@ -6,6 +6,7 @@ import cv2
 import numpy as np
 import pytesseract
 
+from app.catalog import resolve_known
 from app.normalizer import normalize_address
 
 
@@ -21,19 +22,19 @@ def _classify_color(crop: np.ndarray) -> str:
         return "UNKNOWN"
     hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
     h, w = hsv.shape[:2]
-    inner = hsv[max(1, int(h * .15)):max(2, int(h * .85)), max(1, int(w * .03)):max(2, int(w * .97))]
+    inner = hsv[max(1, int(h * .12)):max(2, int(h * .88)), max(1, int(w * .02)):max(2, int(w * .98))]
     sat = inner[:, :, 1]
     val = inner[:, :, 2]
-    mask = (sat > 25) & (val > 100)
+    mask = (sat > 18) & (val > 90)
     if not np.any(mask):
         return "UNKNOWN"
     hue = float(np.median(inner[:, :, 0][mask]))
     sat_med = float(np.median(sat[mask]))
-    if 35 <= hue <= 90 and sat_med > 35:
+    if 33 <= hue <= 95 and sat_med > 25:
         return "INVITRO"
-    if 18 <= hue < 35 and sat_med > 35:
+    if 17 <= hue < 33 and sat_med > 25:
         return "CMD"
-    if 4 <= hue < 18 and sat_med > 25:
+    if 3 <= hue < 17 and sat_med > 20:
         return "OTHER"
     return "UNKNOWN"
 
@@ -83,5 +84,10 @@ def extract_rows(image_path: str) -> list[OCRRow]:
         raw = _ocr(crop)
         if not _looks_like_address(raw):
             continue
-        rows.append(OCRRow(raw_text=raw, nav_address=normalize_address(raw), lab_type=_classify_color(crop)))
+        nav = normalize_address(raw)
+        lab = _classify_color(crop)
+        known = resolve_known(nav)
+        if known:
+            nav, lab = known
+        rows.append(OCRRow(raw_text=raw, nav_address=nav, lab_type=lab))
     return rows

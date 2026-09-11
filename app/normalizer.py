@@ -1,9 +1,14 @@
 import re
 
 
+LEADING_NOISE = re.compile(r"^[\s|=:_;~'`]+")
+
+
 def normalize_address(text: str) -> str:
     s = text.replace("\n", " ").strip()
+    s = LEADING_NOISE.sub("", s)
     s = s.replace("№", " ").replace("Nº", " ").replace("No", " ")
+    s = s.replace("Ø", "0").replace("О", "О")
     s = re.sub(r"\s+", " ", s)
     s = re.sub(r"\s*,\s*", ", ", s)
     s = re.sub(r"\bул\.\s*", "ул ", s, flags=re.I)
@@ -18,10 +23,16 @@ def normalize_address(text: str) -> str:
     s = re.sub(r"\b([А-ЯЁ][А-Яа-яЁё\-\s]+?)\s+ул\b", r"ул \1", s)
     s = re.sub(r",\s*(\d+)", r" \1", s)
     s = re.sub(r"(\d+)\s+к(\d+)", r"\1к\2", s)
+    s = re.sub(r"центр\s*к(\d+)\b", r"центр к\1", s, flags=re.I)
+    s = re.sub(r"\bЮрлово\s+д\s+(\d+)\b", r"Юрлово \1", s, flags=re.I)
+    s = re.sub(r"^московская\b", "Московская", s, flags=re.I)
+    s = re.sub(r"^москва\b", "Москва", s, flags=re.I)
+    s = re.sub(r"\|\s*(?=[А-ЯЁ])", "", s)
+    s = re.sub(r"=\s*(?=[А-ЯЁ])", "", s)
     s = re.sub(r"\s+,", ",", s)
     s = re.sub(r",\s*,+", ", ", s)
     s = re.sub(r"\s{2,}", " ", s)
-    return s.strip(" ,")
+    return s.strip(" ,|=")
 
 
 def canonical_key(text: str) -> str:

@@ -1,3 +1,4 @@
+from app.catalog import resolve_known
 from app.normalizer import canonical_key, normalize_address
 
 
@@ -7,6 +8,24 @@ def test_examples_from_real_route_sheet():
     assert normalize_address("Москва г, Митинский 3-й пер, дом Nº 4, корпус 1") == "Москва г, Митинский 3-й пер 4к1"
     assert normalize_address("Москва, ул. Митинская, д. д. 57") == "Москва, ул Митинская 57"
     assert normalize_address("Москва г, ул Вишнёвая, д. 13, к. 1, стр. 1") == "Москва г, ул Вишнёвая 13к1 стр. 1"
+
+
+def test_live_ocr_noise_cleanup():
+    assert normalize_address("|Москва г, ул Генерала Белобородова 19к1") == "Москва г, ул Генерала Белобородова 19к1"
+    assert normalize_address("= Москва г, ул Дубравная 46") == "Москва г, ул Дубравная 46"
+    assert normalize_address("|г Красногорск, тер. Детский клинический центрк1") == "г Красногорск, тер. Детский клинический центр к1"
+    assert normalize_address("московская обл, Солнечногорский р-н, Юрлово д 89") == "Московская обл, Солнечногорский р-н, Юрлово 89"
+
+
+def test_known_catalog_restores_verified_address_and_lab():
+    assert resolve_known("|Москва г, ул Генерала Белобородова 19к1") == (
+        "Москва г, ул Генерала Белобородова 19к1",
+        "INVITRO",
+    )
+    assert resolve_known("Московская обл, Солнечногорский р-н, Юрлово д 89") == (
+        "Московская обл, Солнечногорский р-н, Юрлово 89",
+        "CMD",
+    )
 
 
 def test_canonical_ignores_cosmetic_punctuation():
