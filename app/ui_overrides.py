@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import Counter
 import re
 
 
@@ -13,8 +14,6 @@ def apply(bot_module) -> None:
         if not raw:
             return None
 
-        # OCR stores the left column first and the address second. Split at the
-        # first recognizable address marker and keep only the laboratory name.
         m = re.search(
             r"\b(?:\d{6}\s*,\s*)?(?:Москва|Московская\s+обл|г\s+Красногорск|Красногорск|Новое\s+Аристово|Юрлово)\b",
             raw,
@@ -23,10 +22,41 @@ def apply(bot_module) -> None:
         name = raw[:m.start()].strip(" |,;:-") if m else raw.strip(" |,;:-")
         name = re.sub(r"\s+", " ", name)
 
-        # Avoid displaying OCR garbage as a lab name.
         if not name or len(name) > 40 or not re.search(r"[А-Яа-яA-Za-z]", name):
             return None
         return name
+
+    def summary_text(points, diff_text=None):
+        invitro = sum(1 for p in points if p.get("lab_type") == "INVITRO")
+        cmd = sum(1 for p in points if p.get("lab_type") == "CMD")
+        unknown = sum(1 for p in points if p.get("lab_type") == "UNKNOWN")
+        done = sum(int(p.get("done", 0)) for p in points)
+        left = len(points) - done
+
+        other_names = Counter()
+        generic_other = 0
+        for p in points:
+            if p.get("lab_type") != "OTHER":
+                continue
+            name = other_lab_name(p)
+            if name:
+                other_names[name] += 1
+            else:
+                generic_other += 1
+
+        lab_lines = [
+            f"🟢 INVITRO: {invitro} · 🟡 CMD: {cmd}",
+        ]
+        other_parts = [f"🟠 {name}: {count}" for name, count in other_names.items()]
+        if generic_other:
+            other_parts.append(f"🟠 Другие: {generic_other}")
+        if other_parts:
+            lab_lines.append(" · ".join(other_parts))
+        lab_lines.append(f"⚪ ?: {unknown}")
+
+        progress = f"\n\n✅ Выполнено: <b>{done}/{len(points)}</b> · осталось <b>{left}</b>" if done else ""
+        diff = f"\n\n{diff_text}" if diff_text else ""
+        return f"🚚 <b>Маршрут</b>\n\nТочек: <b>{len(points)}</b>\n" + "\n".join(lab_lines) + progress + diff
 
     def point_text(point, index, total):
         state = "✅ <b>ВЫПОЛНЕНО</b>\n" if point["done"] else "➡️ <b>ТЕКУЩАЯ ТОЧКА</b>\n"
@@ -42,8 +72,6 @@ def apply(bot_module) -> None:
 
         window = bot_module.window_text(point)
 
-        # For CMD, the LPU number is the primary visual identifier, so show it
-        # before the collection window. Other labs keep the time first.
         if point.get("lab_type") == "CMD":
             if point.get("facility_code"):
                 blocks.append(f"🏥 ЛПУ №<b>{point['facility_code']}</b>")
@@ -55,9 +83,6 @@ def apply(bot_module) -> None:
         raw_phone = point.get("phone")
         phone = bot_module.format_phone(raw_phone)
         if phone:
-            # Use an explicit tel: link instead of relying on each Telegram client
-            # to auto-detect the formatted number. This keeps Android and iPhone
-            # behavior consistent while still showing the human-readable number.
             blocks.append(f'📞 <a href="tel:{raw_phone}">{phone}</a>')
 
         if point.get("note"):
@@ -66,4 +91,5 @@ def apply(bot_module) -> None:
         blocks.append(f"<b>{point['nav_address']}</b>")
         return "\n\n".join(blocks)
 
+    bot_module.summary_text = summary_text
     bot_module.point_text = point_text
