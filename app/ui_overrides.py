@@ -3,6 +3,9 @@ from __future__ import annotations
 from collections import Counter
 import re
 
+from aiogram import F
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+
 
 def apply(bot_module) -> None:
     """Apply small presentation-only overrides without touching route logic."""
@@ -44,9 +47,7 @@ def apply(bot_module) -> None:
             else:
                 generic_other += 1
 
-        lab_lines = [
-            f"🟢 INVITRO: {invitro} · 🟡 CMD: {cmd}",
-        ]
+        lab_lines = [f"🟢 INVITRO: {invitro} · 🟡 CMD: {cmd}"]
         other_parts = [f"🟠 {name}: {count}" for name, count in other_names.items()]
         if generic_other:
             other_parts.append(f"🟠 Другие: {generic_other}")
@@ -63,15 +64,10 @@ def apply(bot_module) -> None:
         source = " · ➕ доп." if point["source"] == "MANUAL" else ""
 
         lab_name = other_lab_name(point)
-        if lab_name:
-            lab_badge = f"🟠 {lab_name}"
-        else:
-            lab_badge = bot_module.badge(point["lab_type"])
-
+        lab_badge = f"🟠 {lab_name}" if lab_name else bot_module.badge(point["lab_type"])
         blocks = [f"{state}<b>{index + 1} из {total}</b> · {lab_badge}{source}"]
 
         window = bot_module.window_text(point)
-
         if point.get("lab_type") == "CMD":
             if point.get("facility_code"):
                 blocks.append(f"🏥 ЛПУ №<b>{point['facility_code']}</b>")
@@ -80,16 +76,65 @@ def apply(bot_module) -> None:
         elif window:
             blocks.append(f"🕓 <b>{window}</b>")
 
-        raw_phone = point.get("phone")
-        phone = bot_module.format_phone(raw_phone)
+        # Keep the phone as plain text. Telegram Android does not reliably
+        # render tel: anchors in ordinary HTML bot messages, while a plain
+        # phone number may be detected natively by the client.
+        phone = bot_module.format_phone(point.get("phone"))
         if phone:
-            blocks.append(f'📞 <a href="tel:{raw_phone}">{phone}</a>')
+            blocks.append(f"📞 {phone}")
 
         if point.get("note"):
             blocks.append(f"📝 <b>Не забыть:</b> {point['note']}")
 
         blocks.append(f"<b>{point['nav_address']}</b>")
         return "\n\n".join(blocks)
+
+    def point_kb(point, route_id, index, total):
+        rows = [[InlineKeyboardButton(text="🗺 Яндекс.Карты", url=bot_module.yandex_url(point["nav_address"]))]]
+        if not point["done"]:
+            rows.append([InlineKeyboardButton(text="✅ Выполнено → следующая", callback_data=f"done:{point['id']}:{route_id}:{index}")])
+
+        if point.get("phone"):
+            rows.append([
+                InlineKeyboardButton(text="📝 Заметка", callback_data=f"note:{point['id']}:{route_id}:{index}"),
+                InlineKeyboardButton(text="📞 Позвонить", callback_data=f"call:{point['id']}"),
+            ])
+            rows.append([InlineKeyboardButton(text="✏️ Изменить номер", callback_data=f"phone:{point['id']}:{route_id}:{index}")])
+        else:
+            rows.append([
+                InlineKeyboardButton(text="📝 Заметка", callback_data=f"note:{point['id']}:{route_id}:{index}"),
+                InlineKeyboardButton(text="📞 Телефон", callback_data=f"phone:{point['id']}:{route_id}:{index}"),
+            ])
+
+        rows.append([
+            InlineKeyboardButton(text="↕️ Переместить", callback_data=f"move:{route_id}:{point['id']}"),
+            InlineKeyboardButton(text="➕ После этой", callback_data=f"add:{route_id}:{index}"),
+        ])
+        nav = []
+        if index > 0:
+            nav.append(InlineKeyboardButton(text="⬅️", callback_data=f"point:{route_id}:{index-1}"))
+        if index < total - 1:
+            nav.append(InlineKeyboardButton(text="➡️", callback_data=f"point:{route_id}:{index+1}"))
+        if nav:
+            rows.append(nav)
+        rows.append([
+            InlineKeyboardButton(text="📋 К списку", callback_data=f"list:{route_id}:{index//6}"),
+            InlineKeyboardButton(text="🏠 Маршрут", callback_data=f"summary:{route_id}"),
+        ])
+        return InlineKeyboardMarkup(inline_keyboard=rows)
+
+    async def call_phone(cb):
+        point_id = int(cb.data.split(":", 1)[1])
+        point = await bot_module.get_point(point_id)
+        if not point or not point.get("phone"):
+            await cb.answer("Телефон не найден", show_alert=True)
+            return
+        name = (point.get("nav_address") or "ЛПУ").strip()[:64]
+        await cb.message.answer_contact(
+            phone_number=point["phone"],
+            first_name=name or "ЛПУ",
+        )
+        await cb.answer("Открываю номер")
 
     async def start(message):
         await message.answer(
@@ -100,6 +145,7 @@ def apply(bot_module) -> None:
 
     bot_module.summary_text = summary_text
     bot_module.point_text = point_text
+    bot_module.point_kb = point_kb
 
     # /start handler is already registered when app.bot is imported. Replace
     # its callback in-place so the presentation override takes effect without
@@ -108,3 +154,8 @@ def apply(bot_module) -> None:
         if getattr(handler, "callback", None) is bot_module.start:
             handler.callback = start
             break
+
+    # A native Telegram contact card is reliable on Android and gives the user
+    # an actual tappable phone action even when tel: links in ordinary HTML
+    # messages are not rendered by the client.
+    bot_module.dp.callback_query.register(call_phone, F.data.startswith("call:"))
