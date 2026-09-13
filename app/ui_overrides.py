@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from collections import Counter
+from html import escape
 import re
 
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, MessageEntity
+import aiohttp
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 
 def apply(bot_module) -> None:
@@ -15,7 +17,6 @@ def apply(bot_module) -> None:
         raw = (point.get("raw_text") or "").strip()
         if not raw:
             return None
-
         m = re.search(
             r"\b(?:\d{6}\s*,\s*)?(?:Москва|Московская\s+обл|г\s+Красногорск|Красногорск|Новое\s+Аристово|Юрлово)\b",
             raw,
@@ -33,7 +34,6 @@ def apply(bot_module) -> None:
         unknown = sum(1 for p in points if p.get("lab_type") == "UNKNOWN")
         done = sum(int(p.get("done", 0)) for p in points)
         left = len(points) - done
-
         other_names = Counter()
         generic_other = 0
         for p in points:
@@ -44,7 +44,6 @@ def apply(bot_module) -> None:
                 other_names[name] += 1
             else:
                 generic_other += 1
-
         lab_lines = [f"🟢 INVITRO: {invitro} · 🟡 CMD: {cmd}"]
         other_parts = [f"🟠 {name}: {count}" for name, count in other_names.items()]
         if generic_other:
@@ -52,35 +51,9 @@ def apply(bot_module) -> None:
         if other_parts:
             lab_lines.append(" · ".join(other_parts))
         lab_lines.append(f"⚪ ?: {unknown}")
-
         progress = f"\n\n✅ Выполнено: <b>{done}/{len(points)}</b> · осталось <b>{left}</b>" if done else ""
         diff = f"\n\n{diff_text}" if diff_text else ""
         return f"🚚 <b>Маршрут</b>\n\nТочек: <b>{len(points)}</b>\n" + "\n".join(lab_lines) + progress + diff
-
-    def point_text(point, index, total):
-        """HTML fallback used outside the native point-card handlers."""
-        state = "✅ <b>ВЫПОЛНЕНО</b>\n" if point["done"] else "➡️ <b>ТЕКУЩАЯ ТОЧКА</b>\n"
-        source = " · ➕ доп." if point["source"] == "MANUAL" else ""
-        lab_name = other_lab_name(point)
-        lab_badge = f"🟠 {lab_name}" if lab_name else bot_module.badge(point["lab_type"])
-        blocks = [f"{state}<b>{index + 1} из {total}</b> · {lab_badge}{source}"]
-
-        window = bot_module.window_text(point)
-        if point.get("lab_type") == "CMD":
-            if point.get("facility_code"):
-                blocks.append(f"🏥 ЛПУ №<b>{point['facility_code']}</b>")
-            if window:
-                blocks.append(f"🕓 <b>{window}</b>")
-        elif window:
-            blocks.append(f"🕓 <b>{window}</b>")
-
-        phone = bot_module.format_phone(point.get("phone"))
-        if phone:
-            blocks.append(f"📞 {phone}")
-        if point.get("note"):
-            blocks.append(f"📝 <b>Не забыть:</b> {point['note']}")
-        blocks.append(f"<b>{point['nav_address']}</b>")
-        return "\n\n".join(blocks)
 
     def point_kb(point, route_id, index, total):
         rows = [[InlineKeyboardButton(text="🗺 Яндекс.Карты", url=bot_module.yandex_url(point["nav_address"]))]]
@@ -107,81 +80,58 @@ def apply(bot_module) -> None:
         ])
         return InlineKeyboardMarkup(inline_keyboard=rows)
 
-    def u16len(value: str) -> int:
-        return len(value.encode("utf-16-le")) // 2
-
-    def point_native(point, index, total):
-        """Return plain text plus explicit Telegram entities.
-
-        The phone is marked as a native phone_number entity. This makes the
-        number clickable in Telegram clients, including Android, without a
-        separate call button and without relying on HTML tel: handling.
-        """
-        parts: list[str] = []
-        entities: list[MessageEntity] = []
-        cursor = 0
-
-        def append(text: str, entity_type: str | None = None):
-            nonlocal cursor
-            parts.append(text)
-            length = u16len(text)
-            if entity_type and length:
-                entities.append(MessageEntity(type=entity_type, offset=cursor, length=length))
-            cursor += length
-
-        append("✅ " if point["done"] else "➡️ ")
-        append("ВЫПОЛНЕНО" if point["done"] else "ТЕКУЩАЯ ТОЧКА", "bold")
-        append("\n")
-        append(f"{index + 1} из {total}", "bold")
-        lab_name = other_lab_name(point)
-        lab_badge = f"🟠 {lab_name}" if lab_name else bot_module.badge(point["lab_type"])
+    def point_text(point, index, total):
+        state = "✅ <b>ВЫПОЛНЕНО</b>\n" if point["done"] else "➡️ <b>ТЕКУЩАЯ ТОЧКА</b>\n"
         source = " · ➕ доп." if point["source"] == "MANUAL" else ""
-        append(f" · {lab_badge}{source}")
-
+        lab_name = other_lab_name(point)
+        lab_badge = f"🟠 {escape(lab_name)}" if lab_name else bot_module.badge(point["lab_type"])
+        blocks = [f"{state}<b>{index + 1} из {total}</b> · {lab_badge}{source}"]
         window = bot_module.window_text(point)
-        if point.get("lab_type") == "CMD" and point.get("facility_code"):
-            append("\n\n🏥 ЛПУ №")
-            append(str(point["facility_code"]), "bold")
-        if window:
-            append("\n\n🕓 ")
-            append(str(window), "bold")
-
-        phone = bot_module.format_phone(point.get("phone"))
-        if phone:
-            append("\n\n📞 ")
-            append(phone, "phone_number")
-
+        if point.get("lab_type") == "CMD":
+            if point.get("facility_code"):
+                blocks.append(f"🏥 ЛПУ №<b>{escape(str(point['facility_code']))}</b>")
+            if window:
+                blocks.append(f"🕓 <b>{escape(str(window))}</b>")
+        elif window:
+            blocks.append(f"🕓 <b>{escape(str(window))}</b>")
+        phone_raw = point.get("phone")
+        phone = bot_module.format_phone(phone_raw)
+        if phone and phone_raw:
+            blocks.append(f'📞 <a href="tel:{escape(str(phone_raw), quote=True)}">{escape(str(phone))}</a>')
         if point.get("note"):
-            append("\n\n📝 ")
-            append("Не забыть:", "bold")
-            append(f" {point['note']}")
+            blocks.append(f"📝 <b>Не забыть:</b> {escape(str(point['note']))}")
+        blocks.append(f"<b>{escape(str(point['nav_address']))}</b>")
+        return "\n\n".join(blocks)
 
-        append("\n\n")
-        append(str(point["nav_address"]), "bold")
-        return "".join(parts), entities
+    async def bot_api(method: str, payload: dict):
+        url = f"https://api.telegram.org/bot{bot_module.TOKEN}/{method}"
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                data = await resp.json()
+        if not data.get("ok"):
+            raise RuntimeError(f"Telegram {method}: {data.get('description', 'unknown error')}")
+        return data.get("result")
+
+    def markup_json(markup):
+        return markup.model_dump(exclude_none=True) if markup else None
 
     async def edit_point(message, point, route_id, index, total):
-        text, entities = point_native(point, index, total)
-        await message.edit_text(
-            text,
-            entities=entities,
-            reply_markup=point_kb(point, route_id, index, total),
-        )
+        payload = {
+            "chat_id": message.chat.id,
+            "message_id": message.message_id,
+            "rich_message": {"html": point_text(point, index, total)},
+            "reply_markup": markup_json(point_kb(point, route_id, index, total)),
+        }
+        await bot_api("editMessageText", payload)
 
     async def answer_point(message, prefix, point, route_id, index, total):
-        text, entities = point_native(point, index, total)
-        if prefix:
-            prefix_len = u16len(prefix)
-            entities = [
-                MessageEntity(type=e.type, offset=e.offset + prefix_len, length=e.length)
-                for e in entities
-            ]
-            text = prefix + text
-        await message.answer(
-            text,
-            entities=entities,
-            reply_markup=point_kb(point, route_id, index, total),
-        )
+        html = (escape(prefix).replace("\n", "<br>") if prefix else "") + point_text(point, index, total)
+        payload = {
+            "chat_id": message.chat.id,
+            "rich_message": {"html": html},
+            "reply_markup": markup_json(point_kb(point, route_id, index, total)),
+        }
+        await bot_api("sendRichMessage", payload)
 
     async def resume_route(cb):
         route_id = int(cb.data.split(":")[1])
@@ -191,11 +141,7 @@ def apply(bot_module) -> None:
             return
         idx = bot_module.first_pending(points)
         if idx is None:
-            await cb.message.edit_text(
-                "🏁 <b>Все точки выполнены</b>\n\n" + summary_text(points),
-                parse_mode="HTML",
-                reply_markup=bot_module.summary_kb(route_id),
-            )
+            await cb.message.edit_text("🏁 <b>Все точки выполнены</b>\n\n" + summary_text(points), parse_mode="HTML", reply_markup=bot_module.summary_kb(route_id))
             await cb.answer()
             return
         await edit_point(cb.message, points[idx], route_id, idx, len(points))
@@ -219,11 +165,7 @@ def apply(bot_module) -> None:
         points = await bot_module.get_points(route_id)
         idx = bot_module.first_pending(points)
         if idx is None:
-            await cb.message.edit_text(
-                "🏁 <b>Маршрут завершён!</b>\n\n" + summary_text(points),
-                parse_mode="HTML",
-                reply_markup=bot_module.summary_kb(route_id),
-            )
+            await cb.message.edit_text("🏁 <b>Маршрут завершён!</b>\n\n" + summary_text(points), parse_mode="HTML", reply_markup=bot_module.summary_kb(route_id))
         else:
             await edit_point(cb.message, points[idx], route_id, idx, len(points))
         await cb.answer("✅ Выполнено")
