@@ -94,7 +94,7 @@ def apply(bot_module) -> None:
     async def start(message):
         await message.answer(
             "🚚 <b>RoutePilot</b>\n\n"
-            "Отправь скриншот маршрутного листа — я распознаю точки и подготовлю маршрут для работы.",
+            "Отправь скриншот маршрутного листа я распознаю точки и подготовлю маршрут для работы.",
             parse_mode="HTML",
         )
 
