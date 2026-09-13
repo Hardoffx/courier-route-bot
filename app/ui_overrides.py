@@ -76,13 +76,6 @@ def apply(bot_module) -> None:
         elif window:
             blocks.append(f"🕓 <b>{window}</b>")
 
-        # Keep the phone as plain text. Telegram Android does not reliably
-        # render tel: anchors in ordinary HTML bot messages, while a plain
-        # phone number may be detected natively by the client.
-        phone = bot_module.format_phone(point.get("phone"))
-        if phone:
-            blocks.append(f"📞 {phone}")
-
         if point.get("note"):
             blocks.append(f"📝 <b>Не забыть:</b> {point['note']}")
 
@@ -95,15 +88,16 @@ def apply(bot_module) -> None:
             rows.append([InlineKeyboardButton(text="✅ Выполнено → следующая", callback_data=f"done:{point['id']}:{route_id}:{index}")])
 
         if point.get("phone"):
+            phone_label = bot_module.format_phone(point.get("phone")) or point.get("phone")
             rows.append([
                 InlineKeyboardButton(text="📝 Заметка", callback_data=f"note:{point['id']}:{route_id}:{index}"),
-                InlineKeyboardButton(text="📞 Позвонить", callback_data=f"call:{point['id']}"),
+                InlineKeyboardButton(text=f"📞 {phone_label}", callback_data=f"call:{point['id']}"),
             ])
             rows.append([InlineKeyboardButton(text="✏️ Изменить номер", callback_data=f"phone:{point['id']}:{route_id}:{index}")])
         else:
             rows.append([
                 InlineKeyboardButton(text="📝 Заметка", callback_data=f"note:{point['id']}:{route_id}:{index}"),
-                InlineKeyboardButton(text="📞 Телефон", callback_data=f"phone:{point['id']}:{route_id}:{index}"),
+                InlineKeyboardButton(text="📞 Добавить телефон", callback_data=f"phone:{point['id']}:{route_id}:{index}"),
             ])
 
         rows.append([
