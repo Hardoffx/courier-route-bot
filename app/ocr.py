@@ -147,12 +147,6 @@ def _facility_code(text: str) -> str | None:
 
 
 def _left_is_cmd_code(text: str) -> bool:
-    """CMD rows have a numeric LPU identifier in the left column.
-
-    Require the whole useful cell to be digits/slashes so an INVITRO label such
-    as 'МО Планерная 5' is never mistaken for CMD merely because it contains a
-    house number.
-    """
     compact = re.sub(r"\s+", "", text or "")
     compact = compact.replace("|", "").replace("\\", "/")
     compact = re.sub(r"^[^0-9]+|[^0-9/]+$", "", compact)
@@ -160,24 +154,11 @@ def _left_is_cmd_code(text: str) -> bool:
 
 
 def _left_is_known_other_lab(text: str) -> bool:
-    """Names seen in the non-INVITRO/non-CMD column.
-
-    Color remains a fallback, but explicit lab names must win when logistics
-    exports use a completely different palette.
-    """
     t = re.sub(r"[^а-яa-z0-9]+", "", (text or "").lower().replace("ё", "е"))
-    return t in {"литех", "liteh", "litek"}
+    return t in {"литех", "liteh", "litek", "литex", "литэх"}
 
 
 def _infer_lab_from_left(raw_left: str, color_lab: str) -> str:
-    """Classify by semantic left-column content first, color second.
-
-    This makes RoutePilot resilient to alternate spreadsheet themes:
-    * numeric-only/slash LPU cells => CMD;
-    * known third-party lab names => OTHER;
-    * familiar colored sheets keep their previous color behavior;
-    * alphabetic cells with an unknown/unusable color fall back to INVITRO.
-    """
     if _left_is_cmd_code(raw_left):
         return "CMD"
     if _left_is_known_other_lab(raw_left):
@@ -193,6 +174,26 @@ def _looks_like_address(text: str) -> bool:
     t = text.lower()
     hints = ("москва", "красногорск", "обл", "ул", "пер", "б-р", "ш ", "тер", "р-н", "аристово", "юрлово")
     return len(text) >= 6 and any(x in t for x in hints)
+
+
+def _extract_address_from_full_row(text: str) -> str:
+    """Recover an address when column detection/OCR is weak on an alternate sheet theme."""
+    if not text:
+        return ""
+    # Start at the first strong geographical marker. This intentionally keeps
+    # postal codes out and ignores whatever laboratory label precedes it.
+    m = re.search(
+        r"\b(?:Москва|Московская\s+обл|г\s+Красногорск|Красногорск|Новое\s+Аристово|Юрлово)\b",
+        text,
+        flags=re.I,
+    )
+    if not m:
+        return ""
+    candidate = text[m.start():].strip()
+    # Full-row OCR can append the time column; strip it from the navigation text.
+    candidate = re.sub(r"\s+[0-2]?\d[:.]\d{2}\s*[-–—]\s*[0-2]?\d[:.]\d{2}\s*$", "", candidate)
+    candidate = re.sub(r"\s+БМ\s*$", "", candidate, flags=re.I)
+    return candidate.strip(" |,;:-")
 
 
 def _is_service_point(address: str) -> bool:
@@ -222,16 +223,28 @@ def extract_rows(image_path: str) -> list[OCRRow]:
             raw_address = _ocr(address_crop, psm=6)
             raw_left = _ocr(left_crop, psm=7)
             raw_digits = _ocr_digits(left_crop)
-            raw = " ".join(x for x in (raw_left, raw_address) if x)
             start, end = _ocr_time(time_crop)
 
-            # Text structure is more stable than spreadsheet colors across
-            # different logisticians/export themes.
             lab = _infer_lab_from_left(raw_left, color_lab)
             code = _facility_code(raw_digits) if lab == "CMD" else None
+
+            # Some logistic exports use different fills/borders and Tesseract
+            # occasionally loses the address column for a whole row (notably
+            # third-party labs such as ЛИТЕХ). OCR the entire row as a fallback
+            # and recover the address from geographical markers.
+            full_row = ""
+            if not _looks_like_address(raw_address) or lab == "OTHER":
+                full_row = _ocr(crop, psm=6)
+                recovered = _extract_address_from_full_row(full_row)
+                if recovered and (_looks_like_address(recovered) or not _looks_like_address(raw_address)):
+                    raw_address = recovered
+            raw = " ".join(x for x in (raw_left, raw_address) if x)
+            if full_row and _left_is_known_other_lab(raw_left):
+                # Keep the explicit lab name in raw_text so the UI can display it.
+                raw = " ".join(x for x in (raw_left, raw_address) if x)
         else:
             raw = _ocr(crop)
-            raw_address = raw
+            raw_address = _extract_address_from_full_row(raw) or raw
             raw_left = ""
             start = end = None
             code = None
@@ -242,7 +255,6 @@ def extract_rows(image_path: str) -> list[OCRRow]:
         if _is_service_point(nav):
             continue
 
-        # Address catalog is the strongest signal for already-known locations.
         known = resolve_known_full(nav)
         if known:
             nav = known.nav_address
