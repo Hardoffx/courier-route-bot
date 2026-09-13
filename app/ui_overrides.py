@@ -86,7 +86,9 @@ def apply(bot_module) -> None:
         lab_name = other_lab_name(point)
         lab_badge = f"🟠 {escape(lab_name)}" if lab_name else bot_module.badge(point["lab_type"])
 
-        blocks = [state, f"<b>{index + 1} из {total}</b> · {lab_badge}{source}"]
+        # Header uses one line break; all following sections keep the wider spacing.
+        html = state + "<br>" + f"<b>{index + 1} из {total}</b> · {lab_badge}{source}"
+        blocks = []
 
         window = bot_module.window_text(point)
         if point.get("lab_type") == "CMD":
@@ -106,11 +108,9 @@ def apply(bot_module) -> None:
             blocks.append(f"📝 <b>Не забыть:</b> {escape(str(point['note']))}")
 
         blocks.append(f"<b>{escape(str(point['nav_address']))}</b>")
-
-        # Rich Message HTML does not preserve raw \n like ordinary Telegram HTML.
-        # Use explicit <br> tags so Android keeps the same card layout while
-        # the tel: link remains clickable.
-        return "<br><br>".join(blocks)
+        if blocks:
+            html += "<br><br>" + "<br><br>".join(blocks)
+        return html
 
     async def bot_api(method: str, payload: dict):
         url = f"https://api.telegram.org/bot{bot_module.TOKEN}/{method}"
