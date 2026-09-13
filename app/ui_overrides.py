@@ -11,11 +11,16 @@ def apply(bot_module) -> None:
         blocks = [f"{state}<b>{index + 1} из {total}</b> · {bot_module.badge(point['lab_type'])}{source}"]
 
         window = bot_module.window_text(point)
-        if window:
-            blocks.append(f"🕓 <b>{window}</b>")
 
-        if point.get("lab_type") == "CMD" and point.get("facility_code"):
-            blocks.append(f"🏥 ЛПУ №<b>{point['facility_code']}</b>")
+        # For CMD, the LPU number is the primary visual identifier, so show it
+        # before the collection window. Other labs keep the time first.
+        if point.get("lab_type") == "CMD":
+            if point.get("facility_code"):
+                blocks.append(f"🏥 ЛПУ №<b>{point['facility_code']}</b>")
+            if window:
+                blocks.append(f"🕓 <b>{window}</b>")
+        elif window:
+            blocks.append(f"🕓 <b>{window}</b>")
 
         raw_phone = point.get("phone")
         phone = bot_module.format_phone(raw_phone)
