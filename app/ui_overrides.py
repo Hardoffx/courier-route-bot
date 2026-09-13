@@ -91,5 +91,20 @@ def apply(bot_module) -> None:
         blocks.append(f"<b>{point['nav_address']}</b>")
         return "\n\n".join(blocks)
 
+    async def start(message):
+        await message.answer(
+            "🚚 <b>RoutePilot</b>\n\n"
+            "Отправь скриншот маршрутного листа — я распознаю точки и подготовлю маршрут для работы.",
+            parse_mode="HTML",
+        )
+
     bot_module.summary_text = summary_text
     bot_module.point_text = point_text
+
+    # /start handler is already registered when app.bot is imported. Replace
+    # its callback in-place so the presentation override takes effect without
+    # touching the main route logic.
+    for handler in bot_module.dp.message.handlers:
+        if getattr(handler, "callback", None) is bot_module.start:
+            handler.callback = start
+            break
