@@ -65,11 +65,6 @@ def _row_bounds(img: np.ndarray) -> list[tuple[int, int]]:
     if not lines:
         return [(0, img.shape[0])]
 
-    # A screenshot may begin inside the first table row or end inside the last
-    # one. Previously only intervals *between* horizontal rules were used, so
-    # the first visible address could silently disappear. Include image edges
-    # when they form a plausible route-row height; address filtering later
-    # discards headers/other non-address fragments safely.
     bounds: list[tuple[int, int]] = []
     first_h = lines[0]
     if 10 <= first_h <= 180:
@@ -95,8 +90,6 @@ def _column_bounds(img: np.ndarray) -> tuple[tuple[int, int], tuple[int, int], t
     xs = _group_positions(np.where(projection >= threshold)[0].tolist())
     xs = [x for x in xs if 0 < x < img.shape[1]]
 
-    # Full sheet: number | code/name | address | blank | time.
-    # Cropped sheet: code/name | address | blank | time.
     if len(xs) >= 4:
         left_end, addr_end, blank_end, time_end = xs[-4:]
         left_start = xs[-5] if len(xs) >= 5 else 0
@@ -153,6 +146,49 @@ def _facility_code(text: str) -> str | None:
     return m.group(1) if m else None
 
 
+def _left_is_cmd_code(text: str) -> bool:
+    """CMD rows have a numeric LPU identifier in the left column.
+
+    Require the whole useful cell to be digits/slashes so an INVITRO label such
+    as 'МО Планерная 5' is never mistaken for CMD merely because it contains a
+    house number.
+    """
+    compact = re.sub(r"\s+", "", text or "")
+    compact = compact.replace("|", "").replace("\\", "/")
+    compact = re.sub(r"^[^0-9]+|[^0-9/]+$", "", compact)
+    return bool(re.fullmatch(r"\d{2,6}(?:/\d{2,6})*", compact))
+
+
+def _left_is_known_other_lab(text: str) -> bool:
+    """Names seen in the non-INVITRO/non-CMD column.
+
+    Color remains a fallback, but explicit lab names must win when logistics
+    exports use a completely different palette.
+    """
+    t = re.sub(r"[^а-яa-z0-9]+", "", (text or "").lower().replace("ё", "е"))
+    return t in {"литех", "liteh", "litek"}
+
+
+def _infer_lab_from_left(raw_left: str, color_lab: str) -> str:
+    """Classify by semantic left-column content first, color second.
+
+    This makes RoutePilot resilient to alternate spreadsheet themes:
+    * numeric-only/slash LPU cells => CMD;
+    * known third-party lab names => OTHER;
+    * familiar colored sheets keep their previous color behavior;
+    * alphabetic cells with an unknown/unusable color fall back to INVITRO.
+    """
+    if _left_is_cmd_code(raw_left):
+        return "CMD"
+    if _left_is_known_other_lab(raw_left):
+        return "OTHER"
+    if color_lab != "UNKNOWN":
+        return color_lab
+    if re.search(r"[А-Яа-яA-Za-z]", raw_left or ""):
+        return "INVITRO"
+    return "UNKNOWN"
+
+
 def _looks_like_address(text: str) -> bool:
     t = text.lower()
     hints = ("москва", "красногорск", "обл", "ул", "пер", "б-р", "ш ", "тер", "р-н", "аристово", "юрлово")
@@ -173,7 +209,8 @@ def extract_rows(image_path: str) -> list[OCRRow]:
     rows: list[OCRRow] = []
     for y1, y2 in _row_bounds(img):
         crop = img[y1:y2, :]
-        lab = _classify_color(crop)
+        color_lab = _classify_color(crop)
+        lab = color_lab
 
         if columns:
             (lx1, lx2), (ax1, ax2), (tx1, tx2) = columns
@@ -184,12 +221,18 @@ def extract_rows(image_path: str) -> list[OCRRow]:
             time_crop = crop[pad_y1:pad_y2, tx1:tx2]
             raw_address = _ocr(address_crop, psm=6)
             raw_left = _ocr(left_crop, psm=7)
+            raw_digits = _ocr_digits(left_crop)
             raw = " ".join(x for x in (raw_left, raw_address) if x)
             start, end = _ocr_time(time_crop)
-            code = _facility_code(_ocr_digits(left_crop)) if lab == "CMD" else None
+
+            # Text structure is more stable than spreadsheet colors across
+            # different logisticians/export themes.
+            lab = _infer_lab_from_left(raw_left, color_lab)
+            code = _facility_code(raw_digits) if lab == "CMD" else None
         else:
             raw = _ocr(crop)
             raw_address = raw
+            raw_left = ""
             start = end = None
             code = None
 
@@ -199,6 +242,7 @@ def extract_rows(image_path: str) -> list[OCRRow]:
         if _is_service_point(nav):
             continue
 
+        # Address catalog is the strongest signal for already-known locations.
         known = resolve_known_full(nav)
         if known:
             nav = known.nav_address
