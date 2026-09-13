@@ -1,5 +1,9 @@
-from app.bot import main
 import asyncio
 
+from app import bot
+from app.ui_overrides import apply
+
+apply(bot)
+
 if __name__ == "__main__":
-    asyncio.run(main())
+    asyncio.run(bot.main())
