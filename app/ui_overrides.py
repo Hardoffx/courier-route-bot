@@ -81,11 +81,13 @@ def apply(bot_module) -> None:
         return InlineKeyboardMarkup(inline_keyboard=rows)
 
     def point_text(point, index, total):
-        state = "✅ <b>ВЫПОЛНЕНО</b>\n" if point["done"] else "➡️ <b>ТЕКУЩАЯ ТОЧКА</b>\n"
+        state = "✅ <b>ВЫПОЛНЕНО</b>" if point["done"] else "➡️ <b>ТЕКУЩАЯ ТОЧКА</b>"
         source = " · ➕ доп." if point["source"] == "MANUAL" else ""
         lab_name = other_lab_name(point)
         lab_badge = f"🟠 {escape(lab_name)}" if lab_name else bot_module.badge(point["lab_type"])
-        blocks = [f"{state}<b>{index + 1} из {total}</b> · {lab_badge}{source}"]
+
+        blocks = [state, f"<b>{index + 1} из {total}</b> · {lab_badge}{source}"]
+
         window = bot_module.window_text(point)
         if point.get("lab_type") == "CMD":
             if point.get("facility_code"):
@@ -94,14 +96,21 @@ def apply(bot_module) -> None:
                 blocks.append(f"🕓 <b>{escape(str(window))}</b>")
         elif window:
             blocks.append(f"🕓 <b>{escape(str(window))}</b>")
+
         phone_raw = point.get("phone")
         phone = bot_module.format_phone(phone_raw)
         if phone and phone_raw:
             blocks.append(f'📞 <a href="tel:{escape(str(phone_raw), quote=True)}">{escape(str(phone))}</a>')
+
         if point.get("note"):
             blocks.append(f"📝 <b>Не забыть:</b> {escape(str(point['note']))}")
+
         blocks.append(f"<b>{escape(str(point['nav_address']))}</b>")
-        return "\n\n".join(blocks)
+
+        # Rich Message HTML does not preserve raw \n like ordinary Telegram HTML.
+        # Use explicit <br> tags so Android keeps the same card layout while
+        # the tel: link remains clickable.
+        return "<br><br>".join(blocks)
 
     async def bot_api(method: str, payload: dict):
         url = f"https://api.telegram.org/bot{bot_module.TOKEN}/{method}"
@@ -124,7 +133,8 @@ def apply(bot_module) -> None:
         })
 
     async def answer_point(message, prefix, point, route_id, index, total):
-        html = (escape(prefix) if prefix else "") + point_text(point, index, total)
+        prefix_html = escape(prefix).replace("\n", "<br>") if prefix else ""
+        html = prefix_html + point_text(point, index, total)
         await bot_api("sendRichMessage", {
             "chat_id": message.chat.id,
             "rich_message": {"html": html},
