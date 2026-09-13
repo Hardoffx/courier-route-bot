@@ -116,22 +116,20 @@ def apply(bot_module) -> None:
         return markup.model_dump(exclude_none=True) if markup else None
 
     async def edit_point(message, point, route_id, index, total):
-        payload = {
+        await bot_api("editMessageText", {
             "chat_id": message.chat.id,
             "message_id": message.message_id,
             "rich_message": {"html": point_text(point, index, total)},
             "reply_markup": markup_json(point_kb(point, route_id, index, total)),
-        }
-        await bot_api("editMessageText", payload)
+        })
 
     async def answer_point(message, prefix, point, route_id, index, total):
-        html = (escape(prefix).replace("\n", "<br>") if prefix else "") + point_text(point, index, total)
-        payload = {
+        html = (escape(prefix) if prefix else "") + point_text(point, index, total)
+        await bot_api("sendRichMessage", {
             "chat_id": message.chat.id,
             "rich_message": {"html": html},
             "reply_markup": markup_json(point_kb(point, route_id, index, total)),
-        }
-        await bot_api("sendRichMessage", payload)
+        })
 
     async def resume_route(cb):
         route_id = int(cb.data.split(":")[1])
