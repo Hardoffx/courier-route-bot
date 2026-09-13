@@ -62,7 +62,25 @@ def _row_bounds(img: np.ndarray) -> list[tuple[int, int]]:
     threshold = max(12, projection.max() * .30)
     ys = np.where(projection >= threshold)[0].tolist()
     lines = _group_positions(ys)
-    bounds = [(a + 1, b) for a, b in zip(lines, lines[1:]) if 15 <= b - a <= 180]
+    if not lines:
+        return [(0, img.shape[0])]
+
+    # A screenshot may begin inside the first table row or end inside the last
+    # one. Previously only intervals *between* horizontal rules were used, so
+    # the first visible address could silently disappear. Include image edges
+    # when they form a plausible route-row height; address filtering later
+    # discards headers/other non-address fragments safely.
+    bounds: list[tuple[int, int]] = []
+    first_h = lines[0]
+    if 10 <= first_h <= 180:
+        bounds.append((0, lines[0]))
+
+    bounds.extend((a + 1, b) for a, b in zip(lines, lines[1:]) if 10 <= b - a <= 180)
+
+    last_h = img.shape[0] - 1 - lines[-1]
+    if 10 <= last_h <= 180:
+        bounds.append((lines[-1] + 1, img.shape[0]))
+
     return bounds or [(0, img.shape[0])]
 
 
