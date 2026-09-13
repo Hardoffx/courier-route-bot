@@ -3,12 +3,11 @@ from __future__ import annotations
 from collections import Counter
 import re
 
-from aiogram import F
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, MessageEntity
 
 
 def apply(bot_module) -> None:
-    """Apply small presentation-only overrides without touching route logic."""
+    """Apply presentation overrides without changing route/storage logic."""
 
     def other_lab_name(point) -> str | None:
         if point.get("lab_type") != "OTHER":
@@ -24,7 +23,6 @@ def apply(bot_module) -> None:
         )
         name = raw[:m.start()].strip(" |,;:-") if m else raw.strip(" |,;:-")
         name = re.sub(r"\s+", " ", name)
-
         if not name or len(name) > 40 or not re.search(r"[А-Яа-яA-Za-z]", name):
             return None
         return name
@@ -60,9 +58,9 @@ def apply(bot_module) -> None:
         return f"🚚 <b>Маршрут</b>\n\nТочек: <b>{len(points)}</b>\n" + "\n".join(lab_lines) + progress + diff
 
     def point_text(point, index, total):
+        """HTML fallback used outside the native point-card handlers."""
         state = "✅ <b>ВЫПОЛНЕНО</b>\n" if point["done"] else "➡️ <b>ТЕКУЩАЯ ТОЧКА</b>\n"
         source = " · ➕ доп." if point["source"] == "MANUAL" else ""
-
         lab_name = other_lab_name(point)
         lab_badge = f"🟠 {lab_name}" if lab_name else bot_module.badge(point["lab_type"])
         blocks = [f"{state}<b>{index + 1} из {total}</b> · {lab_badge}{source}"]
@@ -76,9 +74,11 @@ def apply(bot_module) -> None:
         elif window:
             blocks.append(f"🕓 <b>{window}</b>")
 
+        phone = bot_module.format_phone(point.get("phone"))
+        if phone:
+            blocks.append(f"📞 {phone}")
         if point.get("note"):
             blocks.append(f"📝 <b>Не забыть:</b> {point['note']}")
-
         blocks.append(f"<b>{point['nav_address']}</b>")
         return "\n\n".join(blocks)
 
@@ -86,20 +86,10 @@ def apply(bot_module) -> None:
         rows = [[InlineKeyboardButton(text="🗺 Яндекс.Карты", url=bot_module.yandex_url(point["nav_address"]))]]
         if not point["done"]:
             rows.append([InlineKeyboardButton(text="✅ Выполнено → следующая", callback_data=f"done:{point['id']}:{route_id}:{index}")])
-
-        if point.get("phone"):
-            phone_label = bot_module.format_phone(point.get("phone")) or point.get("phone")
-            rows.append([
-                InlineKeyboardButton(text="📝 Заметка", callback_data=f"note:{point['id']}:{route_id}:{index}"),
-                InlineKeyboardButton(text=f"📞 {phone_label}", callback_data=f"call:{point['id']}"),
-            ])
-            rows.append([InlineKeyboardButton(text="✏️ Изменить номер", callback_data=f"phone:{point['id']}:{route_id}:{index}")])
-        else:
-            rows.append([
-                InlineKeyboardButton(text="📝 Заметка", callback_data=f"note:{point['id']}:{route_id}:{index}"),
-                InlineKeyboardButton(text="📞 Добавить телефон", callback_data=f"phone:{point['id']}:{route_id}:{index}"),
-            ])
-
+        rows.append([
+            InlineKeyboardButton(text="📝 Заметка", callback_data=f"note:{point['id']}:{route_id}:{index}"),
+            InlineKeyboardButton(text="📞 Телефон", callback_data=f"phone:{point['id']}:{route_id}:{index}"),
+        ])
         rows.append([
             InlineKeyboardButton(text="↕️ Переместить", callback_data=f"move:{route_id}:{point['id']}"),
             InlineKeyboardButton(text="➕ После этой", callback_data=f"add:{route_id}:{index}"),
@@ -117,18 +107,156 @@ def apply(bot_module) -> None:
         ])
         return InlineKeyboardMarkup(inline_keyboard=rows)
 
-    async def call_phone(cb):
-        point_id = int(cb.data.split(":", 1)[1])
-        point = await bot_module.get_point(point_id)
-        if not point or not point.get("phone"):
-            await cb.answer("Телефон не найден", show_alert=True)
-            return
-        name = (point.get("nav_address") or "ЛПУ").strip()[:64]
-        await cb.message.answer_contact(
-            phone_number=point["phone"],
-            first_name=name or "ЛПУ",
+    def u16len(value: str) -> int:
+        return len(value.encode("utf-16-le")) // 2
+
+    def point_native(point, index, total):
+        """Return plain text plus explicit Telegram entities.
+
+        The phone is marked as a native phone_number entity. This makes the
+        number clickable in Telegram clients, including Android, without a
+        separate call button and without relying on HTML tel: handling.
+        """
+        parts: list[str] = []
+        entities: list[MessageEntity] = []
+        cursor = 0
+
+        def append(text: str, entity_type: str | None = None):
+            nonlocal cursor
+            parts.append(text)
+            length = u16len(text)
+            if entity_type and length:
+                entities.append(MessageEntity(type=entity_type, offset=cursor, length=length))
+            cursor += length
+
+        append("✅ " if point["done"] else "➡️ ")
+        append("ВЫПОЛНЕНО" if point["done"] else "ТЕКУЩАЯ ТОЧКА", "bold")
+        append("\n")
+        append(f"{index + 1} из {total}", "bold")
+        lab_name = other_lab_name(point)
+        lab_badge = f"🟠 {lab_name}" if lab_name else bot_module.badge(point["lab_type"])
+        source = " · ➕ доп." if point["source"] == "MANUAL" else ""
+        append(f" · {lab_badge}{source}")
+
+        window = bot_module.window_text(point)
+        if point.get("lab_type") == "CMD" and point.get("facility_code"):
+            append("\n\n🏥 ЛПУ №")
+            append(str(point["facility_code"]), "bold")
+        if window:
+            append("\n\n🕓 ")
+            append(str(window), "bold")
+
+        phone = bot_module.format_phone(point.get("phone"))
+        if phone:
+            append("\n\n📞 ")
+            append(phone, "phone_number")
+
+        if point.get("note"):
+            append("\n\n📝 ")
+            append("Не забыть:", "bold")
+            append(f" {point['note']}")
+
+        append("\n\n")
+        append(str(point["nav_address"]), "bold")
+        return "".join(parts), entities
+
+    async def edit_point(message, point, route_id, index, total):
+        text, entities = point_native(point, index, total)
+        await message.edit_text(
+            text,
+            entities=entities,
+            reply_markup=point_kb(point, route_id, index, total),
         )
-        await cb.answer("Открываю номер")
+
+    async def answer_point(message, prefix, point, route_id, index, total):
+        text, entities = point_native(point, index, total)
+        if prefix:
+            prefix_len = u16len(prefix)
+            entities = [
+                MessageEntity(type=e.type, offset=e.offset + prefix_len, length=e.length)
+                for e in entities
+            ]
+            text = prefix + text
+        await message.answer(
+            text,
+            entities=entities,
+            reply_markup=point_kb(point, route_id, index, total),
+        )
+
+    async def resume_route(cb):
+        route_id = int(cb.data.split(":")[1])
+        points = await bot_module.get_points(route_id)
+        if not points:
+            await cb.answer("Маршрут пуст", show_alert=True)
+            return
+        idx = bot_module.first_pending(points)
+        if idx is None:
+            await cb.message.edit_text(
+                "🏁 <b>Все точки выполнены</b>\n\n" + summary_text(points),
+                parse_mode="HTML",
+                reply_markup=bot_module.summary_kb(route_id),
+            )
+            await cb.answer()
+            return
+        await edit_point(cb.message, points[idx], route_id, idx, len(points))
+        await cb.answer()
+
+    async def show_point(cb):
+        _, route_s, idx_s = cb.data.split(":")
+        route_id, idx = int(route_s), int(idx_s)
+        points = await bot_module.get_points(route_id)
+        if not points:
+            await cb.answer("Маршрут пуст", show_alert=True)
+            return
+        idx = max(0, min(idx, len(points) - 1))
+        await edit_point(cb.message, points[idx], route_id, idx, len(points))
+        await cb.answer()
+
+    async def done(cb):
+        _, point_s, route_s, _ = cb.data.split(":")
+        route_id = int(route_s)
+        await bot_module.mark_done(int(point_s))
+        points = await bot_module.get_points(route_id)
+        idx = bot_module.first_pending(points)
+        if idx is None:
+            await cb.message.edit_text(
+                "🏁 <b>Маршрут завершён!</b>\n\n" + summary_text(points),
+                parse_mode="HTML",
+                reply_markup=bot_module.summary_kb(route_id),
+            )
+        else:
+            await edit_point(cb.message, points[idx], route_id, idx, len(points))
+        await cb.answer("✅ Выполнено")
+
+    async def note_save(message, state):
+        data = await state.get_data()
+        await bot_module.set_note(data["point_id"], message.text.strip())
+        point = await bot_module.get_point(data["point_id"])
+        points = await bot_module.get_points(data["route_id"])
+        await state.clear()
+        await answer_point(message, "✅ Заметка сохранена.\n\n", point, data["route_id"], data["idx"], len(points))
+
+    async def phone_save(message, state):
+        data = await state.get_data()
+        phone = await bot_module.set_phone(data["point_id"], message.text.strip())
+        if not phone:
+            await message.answer("❌ Не понял номер. Пришли российский номер из 10–11 цифр, например 8 495 123-45-67.")
+            return
+        point = await bot_module.get_point(data["point_id"])
+        points = await bot_module.get_points(data["route_id"])
+        await state.clear()
+        await answer_point(message, "✅ Телефон сохранён за этим адресом\n\n", point, data["route_id"], data["idx"], len(points))
+
+    async def add_save(message, state):
+        data = await state.get_data()
+        address = bot_module.normalize_address(message.text.strip())
+        after = data.get("after_index", -1)
+        position = after + 2 if after >= 0 else None
+        point_id = await bot_module.add_manual_point(data["route_id"], address, position=position)
+        await state.clear()
+        points = await bot_module.get_points(data["route_id"])
+        idx = next(i for i, p in enumerate(points) if p["id"] == point_id)
+        await answer_point(message, "✅ Точка добавлена\n\n", points[idx], data["route_id"], idx, len(points))
 
     async def start(message):
         await message.answer(
@@ -141,15 +269,23 @@ def apply(bot_module) -> None:
     bot_module.point_text = point_text
     bot_module.point_kb = point_kb
 
-    # /start handler is already registered when app.bot is imported. Replace
-    # its callback in-place so the presentation override takes effect without
-    # touching the main route logic.
-    for handler in bot_module.dp.message.handlers:
-        if getattr(handler, "callback", None) is bot_module.start:
-            handler.callback = start
-            break
+    callback_replacements = {
+        bot_module.resume_route: resume_route,
+        bot_module.show_point: show_point,
+        bot_module.done: done,
+    }
+    for handler in bot_module.dp.callback_query.handlers:
+        replacement = callback_replacements.get(getattr(handler, "callback", None))
+        if replacement:
+            handler.callback = replacement
 
-    # A native Telegram contact card is reliable on Android and gives the user
-    # an actual tappable phone action even when tel: links in ordinary HTML
-    # messages are not rendered by the client.
-    bot_module.dp.callback_query.register(call_phone, F.data.startswith("call:"))
+    message_replacements = {
+        bot_module.start: start,
+        bot_module.note_save: note_save,
+        bot_module.phone_save: phone_save,
+        bot_module.add_save: add_save,
+    }
+    for handler in bot_module.dp.message.handlers:
+        replacement = message_replacements.get(getattr(handler, "callback", None))
+        if replacement:
+            handler.callback = replacement
