@@ -7,6 +7,9 @@ LEADING_NOISE = re.compile(r"^[\s|=:_;~'`]+")
 def normalize_address(text: str) -> str:
     s = text.replace("\n", " ").strip()
     s = LEADING_NOISE.sub("", s)
+    # Route sheets often prefix addresses with a six-digit postal code.
+    # It is not useful for navigation and makes the same LPU look like a new address.
+    s = re.sub(r"^\d{6}\s*,\s*", "", s)
     s = s.replace("№", " ").replace("Nº", " ").replace("No", " ")
     s = s.replace("Ø", "0").replace("О", "О")
     s = re.sub(r"\s+", " ", s)
