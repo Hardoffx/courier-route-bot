@@ -27,7 +27,6 @@ def _save_cache(cache: dict[str, list[float]]) -> None:
 
 
 async def _photon_geocode(session: aiohttp.ClientSession, address: str) -> tuple[float, float] | None:
-    # Moscow/oblast context materially improves ambiguous street matches.
     q = address
     if "москва" not in q.lower() and "москов" not in q.lower() and "красногор" not in q.lower():
         q = f"{q}, Москва, Россия"
@@ -42,7 +41,6 @@ async def _photon_geocode(session: aiohttp.ClientSession, address: str) -> tuple
             return None
         lon, lat = features[0]["geometry"]["coordinates"]
         lat, lon = float(lat), float(lon)
-        # Guard against wildly wrong matches outside Moscow region.
         if not (54.8 <= lat <= 56.3 and 36.0 <= lon <= 39.5):
             return None
         return lat, lon
@@ -54,7 +52,7 @@ async def geocode_addresses(addresses: list[str]) -> dict[str, tuple[float, floa
     cache = _load_cache()
     result: dict[str, tuple[float, float]] = {}
     missing: list[str] = []
-    for address in addresses:
+    for address in dict.fromkeys(addresses):
         cached = cache.get(address)
         if isinstance(cached, list) and len(cached) == 2:
             result[address] = (float(cached[0]), float(cached[1]))
@@ -65,7 +63,6 @@ async def geocode_addresses(addresses: list[str]) -> dict[str, tuple[float, floa
         headers = {"User-Agent": USER_AGENT}
         connector = aiohttp.TCPConnector(limit=4)
         async with aiohttp.ClientSession(headers=headers, connector=connector) as session:
-            # Small parallel batches keep first-time optimization reasonably fast.
             for start in range(0, len(missing), 4):
                 batch = missing[start:start + 4]
                 values = await asyncio.gather(*[_photon_geocode(session, a) for a in batch])
@@ -95,10 +92,7 @@ async def osrm_duration_matrix(coords: list[tuple[float, float]]) -> list[list[f
         durations = data.get("durations")
         if not durations:
             return None
-        return [
-            [None if value is None else float(value) / 60.0 for value in row]
-            for row in durations
-        ]
+        return [[None if value is None else float(value) / 60.0 for value in row] for row in durations]
     except Exception:
         return None
 
@@ -107,8 +101,9 @@ async def road_matrix_for_points(points: list[dict]) -> tuple[list[list[float | 
     """Build a matrix aligned with points; return matrix and geocoded count."""
     addresses = [str(p.get("nav_address") or "").strip() for p in points]
     mapping = await geocode_addresses(addresses)
-    if len(mapping) != len(addresses):
-        return None, len(mapping)
-    coords = [mapping[a] for a in addresses]
+    geocoded = sum(1 for address in addresses if address in mapping)
+    if not all(address in mapping for address in addresses):
+        return None, geocoded
+    coords = [mapping[address] for address in addresses]
     matrix = await osrm_duration_matrix(coords)
-    return matrix, len(mapping)
+    return matrix, geocoded
