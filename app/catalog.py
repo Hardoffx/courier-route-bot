@@ -25,7 +25,7 @@ KNOWN_POINTS: list[KnownPoint] = [
     KnownPoint("Москва г, ул Митинская 48", "INVITRO"),
     KnownPoint("Москва, ул Митинская 57", "INVITRO"),
     KnownPoint("г Красногорск, п Отрадное, ул Кленовая 3", "INVITRO"),
-    KnownPoint("деревня Юрлово, 87, Московская область", "CMD", "5827"),
+    KnownPoint("деревня Юрлово, 89, Московская область", "CMD", "5827"),
     KnownPoint("Новое Аристово, ул Солнечная 5", "OTHER"),
     KnownPoint("Москва г, ул Митинская 44", "CMD", "3433"),
     KnownPoint("Москва г, ул Митинская 27", "INVITRO"),
@@ -53,9 +53,8 @@ def resolve_known_full(address: str) -> KnownPoint | None:
     best: KnownPoint | None = None
     best_score = 0.0
 
-    # Yurlovo is a known courier point whose route sheets can contain an
-    # administrative form or even an inaccurate house number. Always resolve
-    # the locality to the courier-confirmed house 87.
+    # Yurlovo is a known courier point. Route sheets use a long administrative
+    # form; resolve it to the precise village address used for navigation.
     if "юрлово" in key:
         return next(point for point in KNOWN_POINTS if "юрлово" in canonical_key(point.nav_address))
 
