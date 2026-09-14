@@ -11,7 +11,7 @@ import aiohttp
 CACHE_PATH = Path("data/geocache.json")
 CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
 USER_AGENT = "RoutePilot/1.3 (+https://github.com/Hardoffx/courier-route-bot)"
-YURLOVO_QUERY = "деревня Юрлово, 87, Московская область, Россия"
+YURLOVO_QUERY = "деревня Юрлово, 89, Московская область, Россия"
 
 
 def _load_cache() -> dict[str, list[float]]:
@@ -54,11 +54,9 @@ def _query_variants(address: str) -> list[str]:
     base = _clean(address)
     low = base.lower()
 
-    # Courier-confirmed exact point. Route sheets previously contained a long
-    # administrative form and sometimes a wrong house number, which could make
-    # geocoders return the whole Solnechnogorsk district. Always use house 87.
+    # Exact courier point: use the village + house to avoid a district result.
     if "юрлово" in low:
-        return [YURLOVO_QUERY, "деревня Юрлово 87, Московская область, Россия"]
+        return [YURLOVO_QUERY, "деревня Юрлово 89, Московская область, Россия"]
 
     variants: list[str] = []
 
@@ -138,8 +136,8 @@ async def geocode_addresses(addresses: list[str]) -> dict[str, tuple[float, floa
     result: dict[str, tuple[float, float]] = {}
     missing: list[str] = []
     for address in dict.fromkeys(addresses):
-        # Refresh Yurlovo deliberately so an old cached district coordinate or
-        # the former house number can never survive this correction.
+        # Re-geocode Yurlovo so any previously cached district/house coordinate
+        # is replaced by the exact house 89 location.
         force_refresh = "юрлово" in address.lower()
         cached = None if force_refresh else cache.get(address)
         if isinstance(cached, list) and len(cached) == 2 and _valid(float(cached[0]), float(cached[1])):
