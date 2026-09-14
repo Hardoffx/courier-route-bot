@@ -7,7 +7,8 @@ from app import db as db_module
 from app.navigation import yandex_url as precise_yandex_url
 from app.normalizer import canonical_key
 from app.order_preferences import install as install_order_preferences
-from app.ui_overrides import apply
+from app.optimizer_runtime import optimize_remaining_points_live as runtime_optimizer
+from app import ui_overrides
 
 YURLOVO_ADDRESS = "деревня Юрлово, 89, Московская область"
 
@@ -45,11 +46,15 @@ async def init_db_with_address_fixes():
 bot.init_db = init_db_with_address_fixes
 bot.yandex_url = precise_yandex_url
 
-# Install before the UI handlers run. Saved route order is now matched by
-# canonical/fuzzy address instead of only known_address_id, so OCR spelling
-# changes cannot silently lose the learned weekday/weekend order.
+# Saved route order is matched by canonical/fuzzy address instead of only
+# known_address_id, so OCR spelling changes cannot lose the learned order.
 install_order_preferences(db_module, bot)
-apply(bot)
+
+# UI handlers resolve this module global at runtime. Replacing it here keeps
+# normal daytime optimization on the real clock, but prevents a 23:xx test of
+# an already-finished route from treating every LPU as many hours overdue.
+ui_overrides.optimize_remaining_points_live = runtime_optimizer
+ui_overrides.apply(bot)
 
 if __name__ == "__main__":
     asyncio.run(bot.main())
