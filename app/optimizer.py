@@ -52,6 +52,47 @@ def _cluster(address: str) -> str:
     return "OTHER:" + (m.group(1) if m else a[:18])
 
 
+def _fallback_travel(points: list[dict], a: int, b: int) -> float:
+    """Estimate an unknown road leg for the user's compact NW Moscow route.
+
+    The old 35-minute default massively inflated a 20–24 stop route whenever
+    public geocoding missed an address. These values are deliberately modest:
+    the route is dense and most consecutive stops are in the same district.
+    """
+    if a == b:
+        return 0.0
+    ca = _cluster(points[a].get("nav_address", ""))
+    cb = _cluster(points[b].get("nav_address", ""))
+    if ca == cb:
+        return 7.0
+
+    pair = frozenset((ca, cb))
+    adjacent = {
+        frozenset(("MITINO", "OUTER_NW")),
+        frozenset(("MITINO", "STROGINO")),
+        frozenset(("STROGINO", "TUSHINO")),
+        frozenset(("STROGINO", "POKROVSKOE")),
+        frozenset(("TUSHINO", "POKROVSKOE")),
+    }
+    medium = {
+        frozenset(("MITINO", "TUSHINO")),
+        frozenset(("MITINO", "POKROVSKOE")),
+        frozenset(("OUTER_NW", "STROGINO")),
+    }
+    if pair in adjacent:
+        return 12.0
+    if pair in medium:
+        return 16.0
+    if ca.startswith("OTHER:") or cb.startswith("OTHER:"):
+        return 14.0
+    return 20.0
+
+
+def _travel(matrix: list[list[float | None]], points: list[dict], a: int, b: int) -> float:
+    value = matrix[a][b]
+    return float(value) if value is not None else _fallback_travel(points, a, b)
+
+
 def _estimate_schedule(points: list[dict], now_minute: int) -> dict[int, int]:
     minute = now_minute
     previous_cluster = None
@@ -61,12 +102,12 @@ def _estimate_schedule(points: list[dict], now_minute: int) -> dict[int, int]:
         if previous_cluster is None:
             travel = 8
         elif c == previous_cluster:
-            travel = 10
+            travel = 7
         else:
-            travel = 22
+            travel = 14
         minute += travel
         arrivals[p["id"]] = minute
-        minute += 7
+        minute += int(SERVICE_MINUTES)
         previous_cluster = c
     return arrivals
 
@@ -132,17 +173,14 @@ def _simulate_order(
     matrix: list[list[float | None]],
     now_minute: float,
 ) -> tuple[float, float, list[int], float]:
-    """Return drive minutes, max lateness, risky indexes and waiting minutes."""
     t = now_minute
     drive = 0.0
     wait_total = 0.0
     late_max = 0.0
     risky: list[int] = []
-    current = 0  # virtual start is original first remaining point
+    current = 0
     for step, idx in enumerate(order):
-        travel = 0.0 if step == 0 and idx == 0 else matrix[current][idx]
-        if travel is None:
-            travel = 35.0
+        travel = 0.0 if step == 0 and idx == 0 else _travel(matrix, points, current, idx)
         drive += travel
         t += travel
         start = _minutes(points[idx].get("window_start"))
@@ -173,9 +211,9 @@ def _beam_optimize(points: list[dict], matrix: list[list[float | None]], now_min
         for score, t, drive, last, path, remaining in states:
             for idx in remaining:
                 if last == -1:
-                    travel = 0.0 if idx == 0 else (matrix[0][idx] if matrix[0][idx] is not None else 35.0)
+                    travel = 0.0 if idx == 0 else _travel(matrix, points, 0, idx)
                 else:
-                    travel = matrix[last][idx] if matrix[last][idx] is not None else 35.0
+                    travel = _travel(matrix, points, last, idx)
                 arrival = t + travel
                 start = _minutes(points[idx].get("window_start"))
                 end = _minutes(points[idx].get("window_end"))
@@ -200,7 +238,7 @@ def _beam_optimize(points: list[dict], matrix: list[list[float | None]], now_min
 
 
 async def optimize_remaining_points_live(points: list[dict], now: datetime | None = None) -> OptimizationResult:
-    """Use real road travel times when available, with safe offline fallback."""
+    """Use road times where available and calibrated district estimates elsewhere."""
     if now is None:
         now = datetime.now(MOSCOW)
     if now.tzinfo is None:
@@ -239,14 +277,17 @@ async def optimize_remaining_points_live(points: list[dict], now: datetime | Non
     after_clusters = [_cluster(p.get("nav_address", "")) for p in reordered]
     cluster_changes = sum(1 for a, b in zip(before_clusters, after_clusters) if a != b)
 
-    explanation = [f"Учтено реальное автомобильное время между {len(remaining)} оставшимися точками."]
+    coverage = geocoded / max(1, len(remaining))
+    if coverage >= 0.8:
+        explanation = [f"Дорожные данные доступны для {geocoded}/{len(remaining)} адресов; редкие пропуски оценены по району."]
+    else:
+        explanation = [f"Дорожные данные доступны только для {geocoded}/{len(remaining)} адресов; остальные переезды оценены по районам без завышенного 35-минутного штрафа."]
     if moved:
         saved = max(0, round(original_drive - new_drive))
         if saved:
             explanation.append(f"Оценочно экономится около {saved} мин. дороги.")
         if len(new_risky) < len(original_risky):
             explanation.append(f"Точек с риском по времени стало меньше: {len(original_risky)} → {len(new_risky)}.")
-        explanation.append("Штраф за отклонение от исходного порядка не даёт алгоритму перестраивать маршрут без необходимости.")
     else:
         explanation.append("Исходный порядок уже достаточно хороший: перестановка не даёт существенной пользы.")
 
