@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from collections import Counter
 from html import escape
 import re
@@ -12,8 +13,6 @@ from app.optimizer import optimize_remaining_points_live
 
 
 def apply(bot_module) -> None:
-    """Apply presentation overrides without changing route/storage logic."""
-
     def other_lab_name(point) -> str | None:
         if point.get("lab_type") != "OTHER":
             return None
@@ -100,7 +99,6 @@ def apply(bot_module) -> None:
         lab_badge = f"🟠 {escape(lab_name)}" if lab_name else bot_module.badge(point["lab_type"])
         html = state + "<br>" + f"<b>{index + 1} из {total}</b> · {lab_badge}{source}"
         blocks = []
-
         window = bot_module.window_text(point)
         if point.get("lab_type") == "CMD":
             if point.get("facility_code"):
@@ -109,15 +107,12 @@ def apply(bot_module) -> None:
                 blocks.append(f"🕓 <b>{escape(str(window))}</b>")
         elif window:
             blocks.append(f"🕓 <b>{escape(str(window))}</b>")
-
         phone_raw = point.get("phone")
         phone = bot_module.format_phone(phone_raw)
         if phone and phone_raw:
             blocks.append(f'📞 <a href="tel:{escape(str(phone_raw), quote=True)}">{escape(str(phone))}</a>')
-
         if point.get("note"):
             blocks.append(f"📝 <b>Не забыть:</b> {escape(str(point['note']))}")
-
         blocks.append(f"<b>{escape(str(point['nav_address']))}</b>")
         if blocks:
             html += "<br><br>" + "<br><br>".join(blocks)
@@ -138,10 +133,7 @@ def apply(bot_module) -> None:
             return ""
         lines = [f"🚗 В дороге: <b>≈{time_label(result.estimated_drive_minutes)}</b>"]
         if result.estimated_service_minutes is not None:
-            lines.append(
-                f"📦 На точках: <b>≈{time_label(result.estimated_service_minutes)}</b> "
-                f"(по 7 мин × {remaining_count})"
-            )
+            lines.append(f"📦 На точках: <b>≈{time_label(result.estimated_service_minutes)}</b> (по 7 мин × {remaining_count})")
         if result.estimated_wait_minutes:
             lines.append(f"⏳ Ожидание открытия: <b>≈{time_label(result.estimated_wait_minutes)}</b>")
         if result.estimated_total_minutes is not None:
@@ -170,10 +162,9 @@ def apply(bot_module) -> None:
 
     async def answer_point(message, prefix, point, route_id, index, total):
         prefix_html = escape(prefix).replace("\n", "<br>") if prefix else ""
-        html = prefix_html + point_text(point, index, total)
         await bot_api("sendRichMessage", {
             "chat_id": message.chat.id,
-            "rich_message": {"html": html},
+            "rich_message": {"html": prefix_html + point_text(point, index, total)},
             "reply_markup": markup_json(point_kb(point, route_id, index, total)),
         })
 
@@ -222,35 +213,49 @@ def apply(bot_module) -> None:
             return
 
         await cb.answer()
-        processing = await cb.message.answer(
+        # Edit the route card itself so progress is always visible, even on clients
+        # that hide short-lived callback notifications or delay a new bot message.
+        await cb.message.edit_text(
             "⏳ <b>Оптимизирую маршрут…</b>\n\n"
-            "Строю дорожную матрицу и проверяю временные окна всех оставшихся точек.\n"
-            "Сообщение исчезнет, когда расчёт закончится.",
+            "Строю дорожную матрицу между адресами.\n"
+            "Проверяю время работы ЛПУ и ищу лучший порядок точек.\n\n"
+            "<i>Расчёт выполняется, дождись результата…</i>",
             parse_mode="HTML",
+            reply_markup=None,
         )
+
+        async def typing_loop():
+            try:
+                while True:
+                    await bot_module.bot.send_chat_action(chat_id=cb.message.chat.id, action="typing")
+                    await asyncio.sleep(4)
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                pass
+
+        typing_task = asyncio.create_task(typing_loop())
         try:
             result = await optimize_remaining_points_live(points)
         except Exception:
-            await processing.edit_text(
+            typing_task.cancel()
+            await cb.message.edit_text(
                 "❌ <b>Не удалось закончить оптимизацию.</b>\n\nПопробуй нажать кнопку ещё раз.",
                 parse_mode="HTML",
+                reply_markup=summary_kb(route_id),
             )
             return
+        finally:
+            typing_task.cancel()
 
         remaining_count = sum(1 for p in points if not p.get("done"))
         if result.mode == "road":
             if result.geocoded == remaining_count:
                 mode_line = f"🚗 Дорожная матрица: <b>{result.geocoded}/{remaining_count}</b> адресов."
             else:
-                mode_line = (
-                    f"🚗 Дорожная матрица: <b>{result.geocoded}/{remaining_count}</b> адресов. "
-                    "Для неопознанных адресов использована консервативная оценка."
-                )
+                mode_line = f"🚗 Дорожная матрица: <b>{result.geocoded}/{remaining_count}</b> адресов. Для неопознанных адресов использована консервативная оценка."
         else:
-            mode_line = (
-                f"🧭 Дорожная матрица недоступна · координаты: <b>{result.geocoded}/{remaining_count}</b>. "
-                "Использован резервный расчёт по районам."
-            )
+            mode_line = f"🧭 Дорожная матрица недоступна · координаты: <b>{result.geocoded}/{remaining_count}</b>. Использован резервный расчёт по районам."
 
         times = timing_lines(result, remaining_count)
         if result.moved:
@@ -272,11 +277,6 @@ def apply(bot_module) -> None:
                 f"{times}"
             )
             await cb.message.edit_text(summary_text(points, note), parse_mode="HTML", reply_markup=summary_kb(route_id))
-
-        try:
-            await processing.delete()
-        except Exception:
-            pass
 
     async def note_save(message, state):
         data = await state.get_data()
