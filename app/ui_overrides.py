@@ -8,7 +8,7 @@ import aiohttp
 from aiogram import F
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
-from app.optimizer import optimize_remaining_points
+from app.optimizer import optimize_remaining_points_live
 
 
 def apply(bot_module) -> None:
@@ -196,29 +196,44 @@ def apply(bot_module) -> None:
             await cb.answer("Маршрут пуст", show_alert=True)
             return
 
-        result = optimize_remaining_points(points)
-        if result.moved == 0:
-            await cb.answer("Маршрут уже оптимален по текущим окнам времени", show_alert=True)
+        await cb.answer("⚡ Считаю весь оставшийся маршрут…")
+        result = await optimize_remaining_points_live(points)
+        remaining_count = sum(1 for p in points if not p.get("done"))
+
+        if result.mode == "road":
+            if result.geocoded == remaining_count:
+                mode_line = f"🚗 Дорожная матрица: <b>{result.geocoded}/{remaining_count}</b> адресов."
+            else:
+                mode_line = (
+                    f"🚗 Дорожная матрица: <b>{result.geocoded}/{remaining_count}</b> адресов. "
+                    "Для неопознанных адресов использована консервативная оценка."
+                )
+        else:
+            mode_line = (
+                f"🧭 Дорожная матрица недоступна · координаты: <b>{result.geocoded}/{remaining_count}</b>. "
+                "Использован резервный расчёт по районам."
+            )
+
+        if result.moved:
+            for position, point_id in enumerate(result.ordered_ids, 1):
+                await bot_module.move_point(route_id, point_id, position)
+            updated = await bot_module.get_points(route_id)
+            drive_line = f"\nОценка дороги: <b>≈{result.estimated_drive_minutes} мин</b>." if result.estimated_drive_minutes is not None else ""
+            note = (
+                "⚡ <b>Маршрут перестроен</b>\n"
+                f"{mode_line}\n"
+                f"Изменено позиций: <b>{result.moved}</b> · риск по времени: <b>{len(result.urgent_ids)}</b>."
+                f"{drive_line}"
+            )
+            await cb.message.edit_text(summary_text(updated, note), parse_mode="HTML", reply_markup=summary_kb(route_id))
             return
 
-        # Apply the calculated whole-route order. move_point is deliberately
-        # reused here so the optimizer does not bypass existing storage logic.
-        for position, point_id in enumerate(result.ordered_ids, 1):
-            await bot_module.move_point(route_id, point_id, position)
-
-        updated = await bot_module.get_points(route_id)
-        urgent_count = len(result.urgent_ids)
         note = (
-            f"⚡ <b>Маршрут перестроен по времени</b>\n"
-            f"Изменено позиций: <b>{result.moved}</b> · риск по времени: <b>{urgent_count}</b>\n"
-            "Районы переношу блоками, чтобы не уезжать из района ради одной точки и потом возвращаться."
+            "⚡ <b>Проверил весь оставшийся маршрут</b>\n"
+            f"{mode_line}\n"
+            "Переставлять точки сейчас невыгодно: исходный порядок уже хороший с учётом времени ЛПУ."
         )
-        await cb.message.edit_text(
-            summary_text(updated, note),
-            parse_mode="HTML",
-            reply_markup=summary_kb(route_id),
-        )
-        await cb.answer("⚡ Маршрут перестроен")
+        await cb.message.edit_text(summary_text(points, note), parse_mode="HTML", reply_markup=summary_kb(route_id))
 
     async def note_save(message, state):
         data = await state.get_data()
