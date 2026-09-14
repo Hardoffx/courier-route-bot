@@ -1,11 +1,16 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime
+import math
 import re
 from zoneinfo import ZoneInfo
 
+from app.routing import road_matrix_for_points
+
 MOSCOW = ZoneInfo("Europe/Moscow")
+SERVICE_MINUTES = 7.0
+BEAM_WIDTH = 180
 
 
 @dataclass
@@ -15,6 +20,9 @@ class OptimizationResult:
     urgent_ids: list[int]
     cluster_changes: int
     explanation: list[str]
+    mode: str = "fallback"
+    geocoded: int = 0
+    estimated_drive_minutes: int | None = None
 
 
 def _minutes(value: str | None) -> int | None:
@@ -27,13 +35,6 @@ def _minutes(value: str | None) -> int | None:
 
 
 def _cluster(address: str) -> str:
-    """Coarse geography for the courier's north-west Moscow corridor.
-
-    The optimizer intentionally works with large zones instead of individual
-    streets. That prevents pulling one urgent point into the route and then
-    forcing the courier to leave the district and return to it later.
-    Unknown addresses are grouped by their first meaningful street token.
-    """
     a = address.lower().replace("ё", "е")
     rules = [
         ("OUTER_NW", ("красногорск", "отрадное", "юрлово", "аристово", "солнечногор")),
@@ -45,16 +46,11 @@ def _cluster(address: str) -> str:
     for name, needles in rules:
         if any(x in a for x in needles):
             return name
-
     m = re.search(r"(?:ул\.?|улица|б-р|бульвар|ш\.?|шоссе|пер\.?|переулок|пр-д|проезд)\s+([а-яa-z0-9-]+)", a)
     return "OTHER:" + (m.group(1) if m else a[:18])
 
 
 def _estimate_schedule(points: list[dict], now_minute: int) -> dict[int, int]:
-    """Estimate arrival minutes using conservative intra/inter-zone travel.
-
-    This is not navigation ETA. It is used only to identify time-window risk.
-    """
     minute = now_minute
     previous_cluster = None
     arrivals: dict[int, int] = {}
@@ -68,22 +64,13 @@ def _estimate_schedule(points: list[dict], now_minute: int) -> dict[int, int]:
             travel = 22
         minute += travel
         arrivals[p["id"]] = minute
-        minute += 7  # handoff / parking / sample pickup reserve
+        minute += 7
         previous_cluster = c
     return arrivals
 
 
 def optimize_remaining_points(points: list[dict], now: datetime | None = None) -> OptimizationResult:
-    """Reorder only unfinished points while keeping the route recognisable.
-
-    Strategy:
-    1. Keep completed points fixed.
-    2. Detect deadlines that are at risk on the current order.
-    3. Promote the *whole geographic cluster* containing an at-risk point,
-       instead of pulling one address out and causing a later return.
-    4. Preserve original order inside each cluster as much as possible.
-    5. Do not change anything when deadlines do not justify it.
-    """
+    """Offline fallback: windows + coarse zones, no network required."""
     if now is None:
         now = datetime.now(MOSCOW)
     if now.tzinfo is None:
@@ -98,16 +85,11 @@ def optimize_remaining_points(points: list[dict], now: datetime | None = None) -
         return OptimizationResult(original_ids, 0, [], 0, ["Перестройка не требуется."])
 
     arrivals = _estimate_schedule(remaining, now_minute)
-    urgent: list[dict] = []
+    urgent = []
     for p in remaining:
         end = _minutes(p.get("window_end"))
-        if end is None:
-            continue
-        slack = end - arrivals[p["id"]]
-        # Less than 25 minutes reserve at estimated arrival = risk.
-        if slack < 25:
+        if end is not None and end - arrivals[p["id"]] < 25:
             urgent.append(p)
-
     if not urgent:
         return OptimizationResult(original_ids, 0, [], 0, ["Все временные окна укладываются в текущий порядок."])
 
@@ -118,58 +100,163 @@ def optimize_remaining_points(points: list[dict], now: datetime | None = None) -
         c = _cluster(p.get("nav_address", ""))
         clusters.setdefault(c, []).append(p)
         cluster_first.setdefault(c, i)
-
     urgent_clusters: dict[str, int] = {}
     for p in urgent:
         c = _cluster(p.get("nav_address", ""))
-        end = _minutes(p.get("window_end")) or 10_000
-        urgent_clusters[c] = min(urgent_clusters.get(c, 10_000), end)
+        end = _minutes(p.get("window_end")) or 10000
+        urgent_clusters[c] = min(urgent_clusters.get(c, 10000), end)
+    cluster_order = sorted(clusters, key=lambda c: (0 if c in urgent_clusters else 1, urgent_clusters.get(c, 10000), cluster_first[c]))
 
-    # Urgent zones first by earliest closing time. Other zones keep the same
-    # first-seen order, so the result stays close to the paper route.
-    cluster_order = sorted(
-        clusters,
-        key=lambda c: (
-            0 if c in urgent_clusters else 1,
-            urgent_clusters.get(c, 10_000),
-            cluster_first[c],
-        ),
-    )
-
-    reordered_remaining: list[dict] = []
+    reordered = []
     for c in cluster_order:
         block = clusters[c]
-        # Within an urgent zone, only small local adjustment: points with a
-        # closing time come first, ties keep original order.
         if c in urgent_clusters:
-            block = sorted(
-                block,
-                key=lambda p: (
-                    _minutes(p.get("window_end")) if _minutes(p.get("window_end")) is not None else 10_000,
-                    original_index[p["id"]],
-                ),
-            )
-        reordered_remaining.extend(block)
+            block = sorted(block, key=lambda p: (_minutes(p.get("window_end")) if _minutes(p.get("window_end")) is not None else 10000, original_index[p["id"]]))
+        reordered.extend(block)
 
-    ordered_ids = [p["id"] for p in done] + [p["id"] for p in reordered_remaining]
+    ordered_ids = [p["id"] for p in done] + [p["id"] for p in reordered]
+    moved = sum(1 for i, pid in enumerate(ordered_ids) if i < len(original_ids) and pid != original_ids[i])
+    before = [_cluster(p.get("nav_address", "")) for p in remaining]
+    after = [_cluster(p.get("nav_address", "")) for p in reordered]
+    changes = sum(1 for a, b in zip(before, after) if a != b)
+    explanation = ["Использован резервный режим по районам: дорожная матрица недоступна."]
+    explanation.append("Срочные районы подняты блоками, остальные оставлены близко к исходному порядку.")
+    return OptimizationResult(ordered_ids, moved, [p["id"] for p in urgent], changes, explanation)
+
+
+def _simulate_order(order: list[int], points: list[dict], matrix: list[list[float | None]], now_minute: float) -> tuple[float, float, list[int]]:
+    """Return drive minutes, max lateness and risky point indexes."""
+    t = now_minute
+    drive = 0.0
+    late_max = 0.0
+    risky: list[int] = []
+    current = 0  # virtual start is original first remaining point
+    for step, idx in enumerate(order):
+        travel = 0.0 if step == 0 and idx == 0 else matrix[current][idx]
+        if travel is None:
+            travel = 35.0
+        drive += travel
+        t += travel
+        start = _minutes(points[idx].get("window_start"))
+        end = _minutes(points[idx].get("window_end"))
+        if start is not None and t < start:
+            t = float(start)
+        if end is not None:
+            slack = end - t
+            if slack < 25:
+                risky.append(idx)
+            if t > end:
+                late_max = max(late_max, t - end)
+        t += SERVICE_MINUTES
+        current = idx
+    return drive, late_max, risky
+
+
+def _beam_optimize(points: list[dict], matrix: list[list[float | None]], now_minute: float) -> list[int]:
+    n = len(points)
+    if n <= 1:
+        return list(range(n))
+
+    # state: (score, time, drive, last, path tuple, remaining frozenset)
+    states = [(0.0, now_minute, 0.0, -1, tuple(), frozenset(range(n)))]
+    for step in range(n):
+        expanded = []
+        for score, t, drive, last, path, remaining in states:
+            for idx in remaining:
+                # Virtual start sits at the first original point. This strongly
+                # favours keeping the beginning familiar without hard-locking it.
+                if last == -1:
+                    travel = 0.0 if idx == 0 else (matrix[0][idx] if matrix[0][idx] is not None else 35.0)
+                else:
+                    travel = matrix[last][idx] if matrix[last][idx] is not None else 35.0
+                arrival = t + travel
+                start = _minutes(points[idx].get("window_start"))
+                end = _minutes(points[idx].get("window_end"))
+                wait = max(0.0, float(start) - arrival) if start is not None else 0.0
+                service_start = arrival + wait
+                lateness = max(0.0, service_start - float(end)) if end is not None else 0.0
+                slack = float(end) - service_start if end is not None else 999.0
+
+                # Main objective: never miss a closing window.
+                penalty = lateness * 3000.0
+                # Keep a safety reserve near closing time.
+                if slack < 25:
+                    penalty += (25.0 - slack) * 18.0
+                # Real road time discourages bouncing between distant districts.
+                penalty += travel * 1.0
+                # Preserve the paper route unless time/road savings justify a move.
+                penalty += abs(idx - step) * 3.5
+                # Large leaps in original order are especially undesirable.
+                if path and abs(idx - path[-1]) > 5:
+                    penalty += 7.0
+
+                new_t = service_start + SERVICE_MINUTES
+                expanded.append((score + penalty, new_t, drive + travel, idx, path + (idx,), remaining - {idx}))
+        expanded.sort(key=lambda s: s[0])
+        states = expanded[:BEAM_WIDTH]
+    return list(states[0][4]) if states else list(range(n))
+
+
+async def optimize_remaining_points_live(points: list[dict], now: datetime | None = None) -> OptimizationResult:
+    """Use real road travel times when available, with safe offline fallback."""
+    if now is None:
+        now = datetime.now(MOSCOW)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=MOSCOW)
+    local = now.astimezone(MOSCOW)
+    now_minute = local.hour * 60 + local.minute + local.second / 60.0
+
+    done = [p for p in points if p.get("done")]
+    remaining = [p for p in points if not p.get("done")]
+    original_ids = [p["id"] for p in points]
+    if len(remaining) < 2:
+        return OptimizationResult(original_ids, 0, [], 0, ["Перестройка не требуется."], mode="road")
+
+    matrix, geocoded = await road_matrix_for_points(remaining)
+    if matrix is None:
+        result = optimize_remaining_points(points, now)
+        result.geocoded = geocoded
+        return result
+
+    original_order = list(range(len(remaining)))
+    candidate = _beam_optimize(remaining, matrix, now_minute)
+    original_drive, original_late, original_risky = _simulate_order(original_order, remaining, matrix, now_minute)
+    new_drive, new_late, new_risky = _simulate_order(candidate, remaining, matrix, now_minute)
+
+    # Do not reshuffle for tiny gains. A change must improve deadline safety or
+    # save meaningful road time while staying recognisable.
+    improves_deadline = new_late + 0.01 < original_late or len(new_risky) < len(original_risky)
+    saves_drive = original_drive - new_drive >= 8.0
+    if candidate != original_order and not (improves_deadline or saves_drive):
+        candidate = original_order
+        new_drive, new_late, new_risky = original_drive, original_late, original_risky
+
+    reordered = [remaining[i] for i in candidate]
+    ordered_ids = [p["id"] for p in done] + [p["id"] for p in reordered]
     moved = sum(1 for i, pid in enumerate(ordered_ids) if i < len(original_ids) and pid != original_ids[i])
 
     before_clusters = [_cluster(p.get("nav_address", "")) for p in remaining]
-    after_clusters = [_cluster(p.get("nav_address", "")) for p in reordered_remaining]
+    after_clusters = [_cluster(p.get("nav_address", "")) for p in reordered]
     cluster_changes = sum(1 for a, b in zip(before_clusters, after_clusters) if a != b)
 
-    explanation = []
-    for c in cluster_order:
-        if c in urgent_clusters:
-            hh, mm = divmod(urgent_clusters[c], 60)
-            count = len(clusters[c])
-            explanation.append(f"Поднят целиком район/кластер ({count} точ.) из-за закрытия до {hh:02d}:{mm:02d}.")
-    explanation.append("Остальные районы сохранены максимально близко к исходному порядку.")
+    explanation = [f"Учтено реальное автомобильное время между {len(remaining)} оставшимися точками."]
+    if moved:
+        saved = max(0, round(original_drive - new_drive))
+        if saved:
+            explanation.append(f"Оценочно экономится около {saved} мин. дороги.")
+        if len(new_risky) < len(original_risky):
+            explanation.append(f"Точек с риском по времени стало меньше: {len(original_risky)} → {len(new_risky)}.")
+        explanation.append("Штраф за отклонение от исходного порядка не даёт алгоритму перестраивать маршрут без необходимости.")
+    else:
+        explanation.append("Исходный порядок уже достаточно хороший: перестановка не даёт существенной пользы.")
 
     return OptimizationResult(
         ordered_ids=ordered_ids,
         moved=moved,
-        urgent_ids=[p["id"] for p in urgent],
+        urgent_ids=[remaining[i]["id"] for i in new_risky],
         cluster_changes=cluster_changes,
         explanation=explanation,
+        mode="road",
+        geocoded=geocoded,
+        estimated_drive_minutes=round(new_drive),
     )
