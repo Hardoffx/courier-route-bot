@@ -5,7 +5,10 @@ from html import escape
 import re
 
 import aiohttp
+from aiogram import F
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+
+from app.optimizer import optimize_remaining_points
 
 
 def apply(bot_module) -> None:
@@ -55,6 +58,16 @@ def apply(bot_module) -> None:
         diff = f"\n\n{diff_text}" if diff_text else ""
         return f"🚚 <b>Маршрут</b>\n\nТочек: <b>{len(points)}</b>\n" + "\n".join(lab_lines) + progress + diff
 
+    def summary_kb(route_id):
+        return InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="▶️ К текущей точке", callback_data=f"resume:{route_id}")],
+            [InlineKeyboardButton(text="⚡ Оптимизировать по времени", callback_data=f"optimize:{route_id}")],
+            [
+                InlineKeyboardButton(text="📋 Весь маршрут", callback_data=f"list:{route_id}:0"),
+                InlineKeyboardButton(text="➕ Добавить", callback_data=f"add:{route_id}:-1"),
+            ],
+        ])
+
     def point_kb(point, route_id, index, total):
         rows = [[InlineKeyboardButton(text="🗺 Яндекс.Карты", url=bot_module.yandex_url(point["nav_address"]))]]
         if not point["done"]:
@@ -85,8 +98,6 @@ def apply(bot_module) -> None:
         source = " · ➕ доп." if point["source"] == "MANUAL" else ""
         lab_name = other_lab_name(point)
         lab_badge = f"🟠 {escape(lab_name)}" if lab_name else bot_module.badge(point["lab_type"])
-
-        # Header uses one line break; all following sections keep the wider spacing.
         html = state + "<br>" + f"<b>{index + 1} из {total}</b> · {lab_badge}{source}"
         blocks = []
 
@@ -149,7 +160,7 @@ def apply(bot_module) -> None:
             return
         idx = bot_module.first_pending(points)
         if idx is None:
-            await cb.message.edit_text("🏁 <b>Все точки выполнены</b>\n\n" + summary_text(points), parse_mode="HTML", reply_markup=bot_module.summary_kb(route_id))
+            await cb.message.edit_text("🏁 <b>Все точки выполнены</b>\n\n" + summary_text(points), parse_mode="HTML", reply_markup=summary_kb(route_id))
             await cb.answer()
             return
         await edit_point(cb.message, points[idx], route_id, idx, len(points))
@@ -173,10 +184,41 @@ def apply(bot_module) -> None:
         points = await bot_module.get_points(route_id)
         idx = bot_module.first_pending(points)
         if idx is None:
-            await cb.message.edit_text("🏁 <b>Маршрут завершён!</b>\n\n" + summary_text(points), parse_mode="HTML", reply_markup=bot_module.summary_kb(route_id))
+            await cb.message.edit_text("🏁 <b>Маршрут завершён!</b>\n\n" + summary_text(points), parse_mode="HTML", reply_markup=summary_kb(route_id))
         else:
             await edit_point(cb.message, points[idx], route_id, idx, len(points))
         await cb.answer("✅ Выполнено")
+
+    async def optimize_route(cb):
+        route_id = int(cb.data.split(":")[1])
+        points = await bot_module.get_points(route_id)
+        if not points:
+            await cb.answer("Маршрут пуст", show_alert=True)
+            return
+
+        result = optimize_remaining_points(points)
+        if result.moved == 0:
+            await cb.answer("Маршрут уже оптимален по текущим окнам времени", show_alert=True)
+            return
+
+        # Apply the calculated whole-route order. move_point is deliberately
+        # reused here so the optimizer does not bypass existing storage logic.
+        for position, point_id in enumerate(result.ordered_ids, 1):
+            await bot_module.move_point(route_id, point_id, position)
+
+        updated = await bot_module.get_points(route_id)
+        urgent_count = len(result.urgent_ids)
+        note = (
+            f"⚡ <b>Маршрут перестроен по времени</b>\n"
+            f"Изменено позиций: <b>{result.moved}</b> · риск по времени: <b>{urgent_count}</b>\n"
+            "Районы переношу блоками, чтобы не уезжать из района ради одной точки и потом возвращаться."
+        )
+        await cb.message.edit_text(
+            summary_text(updated, note),
+            parse_mode="HTML",
+            reply_markup=summary_kb(route_id),
+        )
+        await cb.answer("⚡ Маршрут перестроен")
 
     async def note_save(message, state):
         data = await state.get_data()
@@ -216,6 +258,7 @@ def apply(bot_module) -> None:
         )
 
     bot_module.summary_text = summary_text
+    bot_module.summary_kb = summary_kb
     bot_module.point_text = point_text
     bot_module.point_kb = point_kb
 
@@ -239,3 +282,5 @@ def apply(bot_module) -> None:
         replacement = message_replacements.get(getattr(handler, "callback", None))
         if replacement:
             handler.callback = replacement
+
+    bot_module.dp.callback_query.register(optimize_route, F.data.startswith("optimize:"))
