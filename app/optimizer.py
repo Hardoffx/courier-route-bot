@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
-import math
 import re
 from zoneinfo import ZoneInfo
 
@@ -23,6 +22,9 @@ class OptimizationResult:
     mode: str = "fallback"
     geocoded: int = 0
     estimated_drive_minutes: int | None = None
+    estimated_service_minutes: int | None = None
+    estimated_wait_minutes: int | None = None
+    estimated_total_minutes: int | None = None
 
 
 def _minutes(value: str | None) -> int | None:
@@ -124,10 +126,16 @@ def optimize_remaining_points(points: list[dict], now: datetime | None = None) -
     return OptimizationResult(ordered_ids, moved, [p["id"] for p in urgent], changes, explanation)
 
 
-def _simulate_order(order: list[int], points: list[dict], matrix: list[list[float | None]], now_minute: float) -> tuple[float, float, list[int]]:
-    """Return drive minutes, max lateness and risky point indexes."""
+def _simulate_order(
+    order: list[int],
+    points: list[dict],
+    matrix: list[list[float | None]],
+    now_minute: float,
+) -> tuple[float, float, list[int], float]:
+    """Return drive minutes, max lateness, risky indexes and waiting minutes."""
     t = now_minute
     drive = 0.0
+    wait_total = 0.0
     late_max = 0.0
     risky: list[int] = []
     current = 0  # virtual start is original first remaining point
@@ -140,6 +148,8 @@ def _simulate_order(order: list[int], points: list[dict], matrix: list[list[floa
         start = _minutes(points[idx].get("window_start"))
         end = _minutes(points[idx].get("window_end"))
         if start is not None and t < start:
+            wait = float(start) - t
+            wait_total += wait
             t = float(start)
         if end is not None:
             slack = end - t
@@ -149,7 +159,7 @@ def _simulate_order(order: list[int], points: list[dict], matrix: list[list[floa
                 late_max = max(late_max, t - end)
         t += SERVICE_MINUTES
         current = idx
-    return drive, late_max, risky
+    return drive, late_max, risky, wait_total
 
 
 def _beam_optimize(points: list[dict], matrix: list[list[float | None]], now_minute: float) -> list[int]:
@@ -157,14 +167,11 @@ def _beam_optimize(points: list[dict], matrix: list[list[float | None]], now_min
     if n <= 1:
         return list(range(n))
 
-    # state: (score, time, drive, last, path tuple, remaining frozenset)
     states = [(0.0, now_minute, 0.0, -1, tuple(), frozenset(range(n)))]
     for step in range(n):
         expanded = []
         for score, t, drive, last, path, remaining in states:
             for idx in remaining:
-                # Virtual start sits at the first original point. This strongly
-                # favours keeping the beginning familiar without hard-locking it.
                 if last == -1:
                     travel = 0.0 if idx == 0 else (matrix[0][idx] if matrix[0][idx] is not None else 35.0)
                 else:
@@ -177,16 +184,11 @@ def _beam_optimize(points: list[dict], matrix: list[list[float | None]], now_min
                 lateness = max(0.0, service_start - float(end)) if end is not None else 0.0
                 slack = float(end) - service_start if end is not None else 999.0
 
-                # Main objective: never miss a closing window.
                 penalty = lateness * 3000.0
-                # Keep a safety reserve near closing time.
                 if slack < 25:
                     penalty += (25.0 - slack) * 18.0
-                # Real road time discourages bouncing between distant districts.
-                penalty += travel * 1.0
-                # Preserve the paper route unless time/road savings justify a move.
+                penalty += travel
                 penalty += abs(idx - step) * 3.5
-                # Large leaps in original order are especially undesirable.
                 if path and abs(idx - path[-1]) > 5:
                     penalty += 7.0
 
@@ -220,16 +222,14 @@ async def optimize_remaining_points_live(points: list[dict], now: datetime | Non
 
     original_order = list(range(len(remaining)))
     candidate = _beam_optimize(remaining, matrix, now_minute)
-    original_drive, original_late, original_risky = _simulate_order(original_order, remaining, matrix, now_minute)
-    new_drive, new_late, new_risky = _simulate_order(candidate, remaining, matrix, now_minute)
+    original_drive, original_late, original_risky, original_wait = _simulate_order(original_order, remaining, matrix, now_minute)
+    new_drive, new_late, new_risky, new_wait = _simulate_order(candidate, remaining, matrix, now_minute)
 
-    # Do not reshuffle for tiny gains. A change must improve deadline safety or
-    # save meaningful road time while staying recognisable.
     improves_deadline = new_late + 0.01 < original_late or len(new_risky) < len(original_risky)
     saves_drive = original_drive - new_drive >= 8.0
     if candidate != original_order and not (improves_deadline or saves_drive):
         candidate = original_order
-        new_drive, new_late, new_risky = original_drive, original_late, original_risky
+        new_drive, new_late, new_risky, new_wait = original_drive, original_late, original_risky, original_wait
 
     reordered = [remaining[i] for i in candidate]
     ordered_ids = [p["id"] for p in done] + [p["id"] for p in reordered]
@@ -250,6 +250,11 @@ async def optimize_remaining_points_live(points: list[dict], now: datetime | Non
     else:
         explanation.append("Исходный порядок уже достаточно хороший: перестановка не даёт существенной пользы.")
 
+    service_minutes = round(SERVICE_MINUTES * len(remaining))
+    drive_minutes = round(new_drive)
+    wait_minutes = round(new_wait)
+    total_minutes = round(new_drive + new_wait + SERVICE_MINUTES * len(remaining))
+
     return OptimizationResult(
         ordered_ids=ordered_ids,
         moved=moved,
@@ -258,5 +263,8 @@ async def optimize_remaining_points_live(points: list[dict], now: datetime | Non
         explanation=explanation,
         mode="road",
         geocoded=geocoded,
-        estimated_drive_minutes=round(new_drive),
+        estimated_drive_minutes=drive_minutes,
+        estimated_service_minutes=service_minutes,
+        estimated_wait_minutes=wait_minutes,
+        estimated_total_minutes=total_minutes,
     )
