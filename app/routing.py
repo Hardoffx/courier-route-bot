@@ -8,9 +8,9 @@ from urllib.parse import quote
 
 import aiohttp
 
-CACHE_PATH = Path("data/geocache.json")
+CACHE_PATH = Path("data/geocache_v2.json")
 CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
-USER_AGENT = "RoutePilot/1.4 (+https://github.com/Hardoffx/courier-route-bot)"
+USER_AGENT = "RoutePilot/1.5 (+https://github.com/Hardoffx/courier-route-bot)"
 YURLOVO_QUERY = "деревня Юрлово, 89, Московская область, Россия"
 
 
@@ -54,20 +54,12 @@ def _clean(address: str) -> str:
 
 
 def _street_first_variant(base: str) -> str | None:
-    """Reorder Moscow addresses to the form geocoders usually understand best."""
     value = re.sub(r"^Москва\s*,\s*", "", base, flags=re.I)
     m = re.match(
-        r"(.+?(?:улица|бульвар|переулок|проезд|шоссе)|(?:улица|бульвар|переулок|проезд|шоссе)\s+.+?)\s+(\d+[А-Яа-яA-Za-z]?(?:\s+(?:корпус|строение)\s+\d+)?)$",
+        r"((?:улица|бульвар|переулок|проезд|шоссе)\s+.+?)\s+(\d+[А-Яа-яA-Za-z]?(?:\s+(?:корпус|строение)\s+\d+)?)$",
         value,
         flags=re.I,
     )
-    if not m:
-        # Most normalized rows are 'улица NAME 19 корпус 1'.
-        m = re.match(
-            r"((?:улица|бульвар|переулок|проезд|шоссе)\s+.+?)\s+(\d+[А-Яа-яA-Za-z]?(?:\s+(?:корпус|строение)\s+\d+)?)$",
-            value,
-            flags=re.I,
-        )
     if not m:
         return None
     return f"{m.group(1)}, {m.group(2)}, Москва, Россия"
@@ -76,7 +68,6 @@ def _street_first_variant(base: str) -> str | None:
 def _query_variants(address: str) -> list[str]:
     base = _clean(address)
     low = base.lower()
-
     if "юрлово" in low:
         return [YURLOVO_QUERY, "деревня Юрлово 89, Московская область, Россия"]
 
@@ -89,10 +80,7 @@ def _query_variants(address: str) -> list[str]:
         if value and value not in variants:
             variants.append(value)
 
-    # First try a street/house-first query. This is materially more reliable
-    # for Russian house numbers than the OCR order 'Москва, улица ..., 19'.
     add(_street_first_variant(base))
-
     if any(x in low for x in ("красногор", "отрадное", "аристово", "солнечногор", "московская область")):
         add(f"{base}, Московская область, Россия")
         add(f"{base}, Россия")
@@ -105,15 +93,11 @@ def _query_variants(address: str) -> list[str]:
     simplified = re.sub(r"\b(?:территория|тер\.?|район|р-н)\b", " ", base, flags=re.I)
     simplified = re.sub(r"\s+", " ", simplified).strip(" ,")
     if simplified != base:
-        if any(x in simplified.lower() for x in ("красногор", "отрадное", "аристово", "солнечногор", "московская область")):
-            add(f"{simplified}, Московская область, Россия")
-        else:
-            add(f"{simplified}, Москва, Россия")
+        add(f"{simplified}, Московская область, Россия" if any(x in simplified.lower() for x in ("красногор", "отрадное", "аристово", "солнечногор", "московская область")) else f"{simplified}, Москва, Россия")
     return variants[:5]
 
 
 def _valid(lat: float, lon: float) -> bool:
-    # Moscow + Moscow Oblast working area, deliberately tighter than all Russia.
     return 54.8 <= lat <= 56.3 and 36.0 <= lon <= 39.5
 
 
@@ -142,7 +126,6 @@ async def _photon_query(session: aiohttp.ClientSession, query: str) -> tuple[flo
 
 
 async def _arcgis_query(session: aiohttp.ClientSession, query: str) -> tuple[float, float] | None:
-    """Second independent geocoder; public ArcGIS World Geocoding endpoint."""
     url = (
         "https://geocode.arcgis.com/arcgis/rest/services/World/GeocodeServer/"
         f"findAddressCandidates?SingleLine={quote(query)}&f=json&countryCode=RUS&maxLocations=5&outFields=Match_addr,Addr_type"
@@ -152,8 +135,17 @@ async def _arcgis_query(session: aiohttp.ClientSession, query: str) -> tuple[flo
             if resp.status != 200:
                 return None
             data = await resp.json()
+        allowed_types = {"PointAddress", "Subaddress", "StreetAddress"}
         for item in data.get("candidates") or []:
             try:
+                # ArcGIS can return a locality/region centroid with a valid Moscow
+                # coordinate. That previously made 24/24 look successful while
+                # producing absurd road times. Accept only strong house/street hits.
+                if float(item.get("score") or 0) < 90:
+                    continue
+                attrs = item.get("attributes") or {}
+                if attrs.get("Addr_type") not in allowed_types:
+                    continue
                 loc = item.get("location") or {}
                 lat, lon = float(loc["y"]), float(loc["x"])
                 if _valid(lat, lon):
@@ -202,7 +194,6 @@ async def geocode_addresses(addresses: list[str]) -> dict[str, tuple[float, floa
     headers = {"User-Agent": USER_AGENT, "Accept-Language": "ru"}
     connector = aiohttp.TCPConnector(limit=5)
     async with aiohttp.ClientSession(headers=headers, connector=connector) as session:
-        # Pass 1: Photon, batched.
         still_missing: list[str] = []
         for start in range(0, len(missing), 4):
             batch = missing[start:start + 4]
@@ -224,8 +215,6 @@ async def geocode_addresses(addresses: list[str]) -> dict[str, tuple[float, floa
             if start + 4 < len(missing):
                 await asyncio.sleep(0.15)
 
-        # Pass 2: ArcGIS. It is independent from OSM/Photon and tends to resolve
-        # Russian street + house combinations that the OSM stack misses.
         after_arcgis: list[str] = []
         for start in range(0, len(still_missing), 4):
             batch = still_missing[start:start + 4]
@@ -247,7 +236,6 @@ async def geocode_addresses(addresses: list[str]) -> dict[str, tuple[float, floa
             if start + 4 < len(still_missing):
                 await asyncio.sleep(0.15)
 
-        # Pass 3: Nominatim, deliberately sequential to respect public limits.
         for address in after_arcgis:
             coord = None
             for query in _query_variants(address):
