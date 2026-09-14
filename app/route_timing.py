@@ -30,8 +30,6 @@ def install(db_module, bot_module) -> None:
 
     async def create_route(chat_id: int, route_date: str, image_path: str | None, rows: list[dict]) -> int:
         await ensure_timing_schema()
-        # If the same day's route is OCRed again in the evening, carry over the
-        # actual start captured during work instead of treating it as a new day.
         previous_start = None
         async with aiosqlite.connect(db_module.DB_PATH) as db:
             cur = await db.execute(
@@ -68,7 +66,6 @@ def install(db_module, bot_module) -> None:
                     break
         if values:
             return int(median(values))
-        # Only a last-resort seed until RoutePilot has learned real starts.
         return 11 * 60 if profile == "weekend" else 11 * 60 + 30
 
     async def get_points(route_id: int):
@@ -82,6 +79,7 @@ def install(db_module, bot_module) -> None:
         if not route:
             return points
         chat_id, route_date, started_at = route
+        profile = db_module.route_profile(route_date)
         if started_at:
             try:
                 dt = datetime.fromisoformat(started_at)
@@ -96,6 +94,7 @@ def install(db_module, bot_module) -> None:
         for point in points:
             point["_route_start_minute"] = start_minute
             point["_route_start_source"] = start_source
+            point["_route_profile"] = profile
         return points
 
     async def mark_done(point_id: int):
@@ -111,9 +110,6 @@ def install(db_module, bot_module) -> None:
                 cur = await db.execute("SELECT COUNT(*) FROM route_points WHERE route_id=? AND done=1", (route_id,))
                 done_before = int((await cur.fetchone())[0])
                 if route and not route[0] and done_before == 0:
-                    # The first point is normally marked done after pickup. Back
-                    # up by the standard service reserve to approximate the time
-                    # the courier entered/started the first point.
                     started = now - timedelta(minutes=SERVICE_MINUTES)
                     await db.execute("UPDATE routes SET started_at=? WHERE id=?", (started.isoformat(timespec="seconds"), route_id))
                     await db.commit()
