@@ -4,19 +4,18 @@ import re
 from urllib.parse import quote_plus
 
 
+YURLOVO_QUERY = "деревня Юрлово, 87, Московская область, Россия"
+
+
 def navigation_query(address: str) -> str:
-    """Return a map-search query with known locality ambiguities removed."""
+    """Return a precise map-search query for the courier point."""
     q = re.sub(r"\s+", " ", str(address or "").strip())
 
-    # Yandex can interpret bare "Юрлово <house>" as the whole locality/area.
-    # Preserve the actual house number and explicitly say that this is a village.
+    # This route-sheet locality is ambiguous in Yandex: a long administrative
+    # string can select the whole Solnechnogorsk district instead of the house.
+    # The courier-confirmed destination is exactly village Yurlovo, house 87.
     if re.search(r"\bЮрлово\b", q, flags=re.I):
-        q = re.sub(r"\b(?:д\.?|деревня)?\s*Юрлово\b", "деревня Юрлово", q, count=1, flags=re.I)
-        # Remove administrative noise that can make the search less precise.
-        q = re.sub(r"\bСолнечногорск(?:ий|ого)?\s+(?:р-н|район)\b,?\s*", "", q, flags=re.I)
-        q = re.sub(r"\bМосковская\s+обл(?:асть)?\b,?\s*", "Московская область, ", q, flags=re.I)
-        q = re.sub(r"\s*,\s*,+", ", ", q)
-        q = re.sub(r"\s+", " ", q).strip(" ,")
+        return YURLOVO_QUERY
 
     return q
 
