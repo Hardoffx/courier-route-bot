@@ -123,6 +123,31 @@ def apply(bot_module) -> None:
             html += "<br><br>" + "<br><br>".join(blocks)
         return html
 
+    def time_label(minutes: int | None) -> str | None:
+        if minutes is None:
+            return None
+        minutes = max(0, int(minutes))
+        hours, mins = divmod(minutes, 60)
+        if hours:
+            human = f"{hours} ч {mins} мин" if mins else f"{hours} ч"
+            return f"{minutes} мин ({human})"
+        return f"{minutes} мин"
+
+    def timing_lines(result, remaining_count: int) -> str:
+        if result.estimated_drive_minutes is None:
+            return ""
+        lines = [f"🚗 В дороге: <b>≈{time_label(result.estimated_drive_minutes)}</b>"]
+        if result.estimated_service_minutes is not None:
+            lines.append(
+                f"📦 На точках: <b>≈{time_label(result.estimated_service_minutes)}</b> "
+                f"(по 7 мин × {remaining_count})"
+            )
+        if result.estimated_wait_minutes:
+            lines.append(f"⏳ Ожидание открытия: <b>≈{time_label(result.estimated_wait_minutes)}</b>")
+        if result.estimated_total_minutes is not None:
+            lines.append(f"⏱ Всего по расчёту: <b>≈{time_label(result.estimated_total_minutes)}</b>")
+        return "\n" + "\n".join(lines)
+
     async def bot_api(method: str, payload: dict):
         url = f"https://api.telegram.org/bot{bot_module.TOKEN}/{method}"
         async with aiohttp.ClientSession() as session:
@@ -196,10 +221,23 @@ def apply(bot_module) -> None:
             await cb.answer("Маршрут пуст", show_alert=True)
             return
 
-        await cb.answer("⚡ Считаю весь оставшийся маршрут…")
-        result = await optimize_remaining_points_live(points)
-        remaining_count = sum(1 for p in points if not p.get("done"))
+        await cb.answer()
+        processing = await cb.message.answer(
+            "⏳ <b>Оптимизирую маршрут…</b>\n\n"
+            "Строю дорожную матрицу и проверяю временные окна всех оставшихся точек.\n"
+            "Сообщение исчезнет, когда расчёт закончится.",
+            parse_mode="HTML",
+        )
+        try:
+            result = await optimize_remaining_points_live(points)
+        except Exception:
+            await processing.edit_text(
+                "❌ <b>Не удалось закончить оптимизацию.</b>\n\nПопробуй нажать кнопку ещё раз.",
+                parse_mode="HTML",
+            )
+            return
 
+        remaining_count = sum(1 for p in points if not p.get("done"))
         if result.mode == "road":
             if result.geocoded == remaining_count:
                 mode_line = f"🚗 Дорожная матрица: <b>{result.geocoded}/{remaining_count}</b> адресов."
@@ -214,26 +252,31 @@ def apply(bot_module) -> None:
                 "Использован резервный расчёт по районам."
             )
 
+        times = timing_lines(result, remaining_count)
         if result.moved:
             for position, point_id in enumerate(result.ordered_ids, 1):
                 await bot_module.move_point(route_id, point_id, position)
             updated = await bot_module.get_points(route_id)
-            drive_line = f"\nОценка дороги: <b>≈{result.estimated_drive_minutes} мин</b>." if result.estimated_drive_minutes is not None else ""
             note = (
                 "⚡ <b>Маршрут перестроен</b>\n"
                 f"{mode_line}\n"
                 f"Изменено позиций: <b>{result.moved}</b> · риск по времени: <b>{len(result.urgent_ids)}</b>."
-                f"{drive_line}"
+                f"{times}"
             )
             await cb.message.edit_text(summary_text(updated, note), parse_mode="HTML", reply_markup=summary_kb(route_id))
-            return
+        else:
+            note = (
+                "⚡ <b>Проверил весь оставшийся маршрут</b>\n"
+                f"{mode_line}\n"
+                "Переставлять точки сейчас невыгодно: исходный порядок уже хороший с учётом времени ЛПУ."
+                f"{times}"
+            )
+            await cb.message.edit_text(summary_text(points, note), parse_mode="HTML", reply_markup=summary_kb(route_id))
 
-        note = (
-            "⚡ <b>Проверил весь оставшийся маршрут</b>\n"
-            f"{mode_line}\n"
-            "Переставлять точки сейчас невыгодно: исходный порядок уже хороший с учётом времени ЛПУ."
-        )
-        await cb.message.edit_text(summary_text(points, note), parse_mode="HTML", reply_markup=summary_kb(route_id))
+        try:
+            await processing.delete()
+        except Exception:
+            pass
 
     async def note_save(message, state):
         data = await state.get_data()
