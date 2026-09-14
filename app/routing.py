@@ -10,7 +10,8 @@ import aiohttp
 
 CACHE_PATH = Path("data/geocache.json")
 CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
-USER_AGENT = "RoutePilot/1.2 (+https://github.com/Hardoffx/courier-route-bot)"
+USER_AGENT = "RoutePilot/1.3 (+https://github.com/Hardoffx/courier-route-bot)"
+YURLOVO_QUERY = "деревня Юрлово, 87, Московская область, Россия"
 
 
 def _load_cache() -> dict[str, list[float]]:
@@ -52,6 +53,13 @@ def _clean(address: str) -> str:
 def _query_variants(address: str) -> list[str]:
     base = _clean(address)
     low = base.lower()
+
+    # Courier-confirmed exact point. Route sheets previously contained a long
+    # administrative form and sometimes a wrong house number, which could make
+    # geocoders return the whole Solnechnogorsk district. Always use house 87.
+    if "юрлово" in low:
+        return [YURLOVO_QUERY, "деревня Юрлово 87, Московская область, Россия"]
+
     variants: list[str] = []
 
     def add(value: str) -> None:
@@ -59,8 +67,7 @@ def _query_variants(address: str) -> list[str]:
         if value and value not in variants:
             variants.append(value)
 
-    # Preserve explicit Moscow-region localities. Never force them into Moscow city.
-    if any(x in low for x in ("красногор", "отрадное", "юрлово", "аристово", "солнечногор", "московская область")):
+    if any(x in low for x in ("красногор", "отрадное", "аристово", "солнечногор", "московская область")):
         add(f"{base}, Московская область, Россия")
         add(f"{base}, Россия")
     elif "москва" in low:
@@ -69,11 +76,10 @@ def _query_variants(address: str) -> list[str]:
         add(f"Москва, {base}, Россия")
         add(f"{base}, Москва, Россия")
 
-    # Geocoders often do better without administrative/service words.
     simplified = re.sub(r"\b(?:территория|тер\.?|район|р-н)\b", " ", base, flags=re.I)
     simplified = re.sub(r"\s+", " ", simplified).strip(" ,")
     if simplified != base:
-        if any(x in simplified.lower() for x in ("красногор", "отрадное", "юрлово", "аристово", "солнечногор", "московская область")):
+        if any(x in simplified.lower() for x in ("красногор", "отрадное", "аристово", "солнечногор", "московская область")):
             add(f"{simplified}, Московская область, Россия")
         else:
             add(f"{simplified}, Москва, Россия")
@@ -85,7 +91,6 @@ def _valid(lat: float, lon: float) -> bool:
 
 
 def _candidate_coords(features: list[dict]) -> tuple[float, float] | None:
-    # Do not trust only the first result: inspect several Moscow-region candidates.
     for feature in features[:5]:
         try:
             lon, lat = feature["geometry"]["coordinates"]
@@ -128,27 +133,15 @@ async def _nominatim_query(session: aiohttp.ClientSession, query: str) -> tuple[
     return None
 
 
-async def _geocode_one(session: aiohttp.ClientSession, address: str) -> tuple[float, float] | None:
-    variants = _query_variants(address)
-    for query in variants:
-        coord = await _photon_query(session, query)
-        if coord:
-            return coord
-    # Nominatim is a fallback. Keep requests sequential/rate-limited at caller level.
-    for query in variants:
-        coord = await _nominatim_query(session, query)
-        if coord:
-            return coord
-        await asyncio.sleep(1.05)
-    return None
-
-
 async def geocode_addresses(addresses: list[str]) -> dict[str, tuple[float, float]]:
     cache = _load_cache()
     result: dict[str, tuple[float, float]] = {}
     missing: list[str] = []
     for address in dict.fromkeys(addresses):
-        cached = cache.get(address)
+        # Refresh Yurlovo deliberately so an old cached district coordinate or
+        # the former house number can never survive this correction.
+        force_refresh = "юрлово" in address.lower()
+        cached = None if force_refresh else cache.get(address)
         if isinstance(cached, list) and len(cached) == 2 and _valid(float(cached[0]), float(cached[1])):
             result[address] = (float(cached[0]), float(cached[1]))
         else:
@@ -160,16 +153,17 @@ async def geocode_addresses(addresses: list[str]) -> dict[str, tuple[float, floa
     headers = {"User-Agent": USER_AGENT, "Accept-Language": "ru"}
     connector = aiohttp.TCPConnector(limit=4)
     async with aiohttp.ClientSession(headers=headers, connector=connector) as session:
-        # Photon pass first: cheap enough to parallelize in small batches.
         still_missing: list[str] = []
         for start in range(0, len(missing), 4):
             batch = missing[start:start + 4]
+
             async def photon_only(address: str):
                 for query in _query_variants(address):
                     coord = await _photon_query(session, query)
                     if coord:
                         return coord
                 return None
+
             values = await asyncio.gather(*[photon_only(a) for a in batch])
             for address, coord in zip(batch, values):
                 if coord:
@@ -180,7 +174,6 @@ async def geocode_addresses(addresses: list[str]) -> dict[str, tuple[float, floa
             if start + 4 < len(missing):
                 await asyncio.sleep(0.2)
 
-        # Nominatim fallback: one address at a time to respect the public service.
         for address in still_missing:
             coord = None
             for query in _query_variants(address):
