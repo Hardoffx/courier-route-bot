@@ -6,17 +6,18 @@ from app import bot
 from app import db as db_module
 from app.navigation import yandex_url as precise_yandex_url
 from app.normalizer import canonical_key
+from app.order_preferences import install as install_order_preferences
 from app.ui_overrides import apply
 
-YURLOVO_ADDRESS = "деревня Юрлово, 87, Московская область"
+YURLOVO_ADDRESS = "деревня Юрлово, 89, Московская область"
 
 _original_init_db = bot.init_db
 
 
 async def init_db_with_address_fixes():
     await _original_init_db()
-    # Correct already-saved routes too, not only newly OCRed ones. This makes
-    # the current route card, map link and optimizer all use the same house.
+    # Keep existing routes and the address catalogue on the courier-confirmed
+    # Yurlovo house 89 so maps and optimization use the same exact point.
     async with aiosqlite.connect(db_module.DB_PATH) as db:
         await db.execute(
             "UPDATE route_points SET nav_address=? WHERE lower(nav_address) LIKE '%юрлово%'",
@@ -33,8 +34,6 @@ async def init_db_with_address_fixes():
                     (YURLOVO_ADDRESS, canonical_key(YURLOVO_ADDRESS), row[0]),
                 )
             except aiosqlite.IntegrityError:
-                # If a corrected canonical row already exists, keeping the old
-                # known-address row is harmless; route_points are fixed above.
                 await db.rollback()
                 await db.execute(
                     "UPDATE route_points SET nav_address=? WHERE lower(nav_address) LIKE '%юрлово%'",
@@ -45,6 +44,11 @@ async def init_db_with_address_fixes():
 
 bot.init_db = init_db_with_address_fixes
 bot.yandex_url = precise_yandex_url
+
+# Install before the UI handlers run. Saved route order is now matched by
+# canonical/fuzzy address instead of only known_address_id, so OCR spelling
+# changes cannot silently lose the learned weekday/weekend order.
+install_order_preferences(db_module, bot)
 apply(bot)
 
 if __name__ == "__main__":
